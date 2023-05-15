@@ -399,6 +399,14 @@ def dataio_prepare(hparams):
         train_batch_sampler,
         valid_batch_sampler,
     )
+    
+def word_freq_preprocess_fn(wf):
+        wf = wf + 1
+        wf = wf.log()
+        wf = wf / wf.max()
+
+        # range: 0 - 1
+        return wf
 
 
 if __name__ == "__main__":
@@ -444,7 +452,6 @@ if __name__ == "__main__":
         prepare_word_frequencies,
         kwargs={
             "data_file": hparams["train_csv"],
-            "data_folder": hparams["data_folder"],
             "save_folder": hparams["output_folder"],
             "tokenizer": hparams["tokenizer"]
         },
@@ -452,6 +459,9 @@ if __name__ == "__main__":
     word_freq = torch.load(os.path.join(hparams["output_folder"], "word_freq.pt"))
     if not( word_freq.size(0) == tokenizer.vocab_size):
         logger.error("Word frequency file and tokenizer don't match.!!!")
+    
+    word_freq = word_freq_preprocess_fn(word_freq)
+    word_freq[tokenizer.pad_token_id] = 0.  # stable training
 
 
 

@@ -17,13 +17,13 @@ Authors
 logger = logging.getLogger(__name__)
 
 
-def prepare_word_frequencies(data_file,data_folder,save_folder, tokenizer):
+def prepare_word_frequencies(data_file,save_folder, tokenizer):
     """
     This converts lines of text into a dictionary of word ferquencies-
 
     Arguments
     ---------
-    split : str
+    data_file : str
         name to the file containing the librispeech text transcription.
     data_folder: str
         path to the file containing the librispeech text transcription.
