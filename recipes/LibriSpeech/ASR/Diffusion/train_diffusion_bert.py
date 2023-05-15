@@ -449,6 +449,11 @@ if __name__ == "__main__":
             "tokenizer": hparams["tokenizer"]
         },
     )
+    word_freq = torch.load(os.path.join(hparams["output_folder"], "word_freq.pt"))
+    if not( word_freq.size(0) == tokenizer.vocab_size):
+        logger.error("Word frequency file and tokenizer don't match.!!!")
+
+
 
     # here we create the datasets objects as well as tokenization and encoding
     (

@@ -45,7 +45,7 @@ def prepare_word_frequencies(data_file,data_folder,save_folder, tokenizer):
     save_file= os.path.join(save_folder, "word_freq.pt")
 
     if os.path.isfile(save_file):
-        logger.info("Skipping preparation, completed in previous run.")
+        logger.info("Skipping word-freq, completed in previous run.")
         return
     
     if not (os.path.isfile(data_file)):
@@ -55,13 +55,11 @@ def prepare_word_frequencies(data_file,data_folder,save_folder, tokenizer):
     train_data = TextLoader(tokenizer=tokenizer).load(data_file=data_file)
 
     word_freq = torch.zeros((tokenizer.vocab_size,), dtype=torch.int64)
-    i=0
+
     for data in tqdm(train_data):
-        i+=1
         for iid in data['input_ids']:
             word_freq[iid] += 1
-        if i >=  100:
-            break
+
     torch.save(word_freq, save_file)
 
 
