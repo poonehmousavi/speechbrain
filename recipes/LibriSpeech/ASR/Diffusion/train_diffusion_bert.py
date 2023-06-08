@@ -18,7 +18,6 @@ from pathlib import Path
 import speechbrain as sb
 from hyperpyyaml import load_hyperpyyaml
 from speechbrain.utils.distributed import run_on_main
-from transformers import AutoTokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +259,8 @@ class ASR(sb.core.Brain):
         self.on_fit_batch_end(batch, outputs, loss, should_step)
         return loss.detach().cpu()
 
+def process_fn_in_collate(wf):
+    return wf - wf.mean()
 
 def dataio_prepare(hparams):
     """This function prepares the datasets to be used in the brain class.
@@ -312,6 +313,8 @@ def dataio_prepare(hparams):
     # We get the tokenizer as we need it to encode the labels when creating
     # mini-batches.
     tokenizer = hparams["tokenizer"]
+    word_freq =  hparams['word_freq']
+
 
     # 2. Define audio pipeline:
     @sb.utils.data_pipeline.takes("wav")
@@ -325,14 +328,7 @@ def dataio_prepare(hparams):
     @sb.utils.data_pipeline.takes("wav")
     @sb.utils.data_pipeline.provides("sig")
     def audio_pipeline_train(wav):
-        # Speed Perturb is done here so it is multi-threaded with the
-        # workers of the dataloader (faster).
-        if hparams["speed_perturb"]:
-            sig = sb.dataio.dataio.read_audio(wav)
-
-            sig = hparams["speed_perturb"](sig.unsqueeze(0)).squeeze(0)
-        else:
-            sig = sb.dataio.dataio.read_audio(wav)
+        sig = sb.dataio.dataio.read_audio(wav)
         return sig
 
     sb.dataio.dataset.add_dynamic_item([train_data], audio_pipeline_train)
@@ -340,7 +336,7 @@ def dataio_prepare(hparams):
     # 3. Define text pipeline:
     @sb.utils.data_pipeline.takes("wrd")
     @sb.utils.data_pipeline.provides(
-        "wrd", "tokens_list","attention_mask", "tokens_bos", "tokens_eos", "tokens"
+        "wrd", "tokens_list","attention_mask", "tokens_bos", "tokens_eos", "tokens","word_freq_logits"
     )
     def text_pipeline(wrd):
         yield wrd
@@ -349,18 +345,20 @@ def dataio_prepare(hparams):
         yield tokens_list
         attention_mask = input_encodings['attention_mask']
         yield attention_mask
-        tokens_bos = torch.LongTensor([hparams["bos_index"]] + (tokens_list))
+        tokens_bos = torch.LongTensor([tokenizer.cls_token_id] + (tokens_list))
         yield tokens_bos
-        tokens_eos = torch.LongTensor(tokens_list + [hparams["eos_index"]])
+        tokens_eos = torch.LongTensor(tokens_list + [tokenizer.sep_token_id])
         yield tokens_eos
         tokens = torch.LongTensor(tokens_list)
         yield tokens
+        word_freq_logits =process_fn_in_collate(word_freq.gather(0, torch.tensor(tokens_list)))
+        yield word_freq_logits
 
     sb.dataio.dataset.add_dynamic_item(datasets, text_pipeline)
 
     # 4. Set output:
     sb.dataio.dataset.set_output_keys(
-        datasets, ["id", "sig", "wrd", "tokens_bos", "tokens_eos", "tokens","attention_mask"],
+        datasets, ["id", "sig", "wrd", "tokens_bos", "tokens_eos", "tokens","attention_mask", "word_freq_logits"],
     )
 
     # 5. If Dynamic Batching is used, we instantiate the needed samplers.
@@ -443,8 +441,28 @@ if __name__ == "__main__":
             "skip_prep": hparams["skip_prep"],
         },
     )
-    tokenizer = AutoTokenizer.from_pretrained(hparams["pretrained_lm_tokenizer_path"])
+
+    # tokenizer = AutoTokenizer.from_pretrained(hparams["pretrained_lm_tokenizer_path"])
+    # hparams["tokenizer"] = tokenizer
+    tokenizer =  hparams['lm_model'].tokenizer
     hparams["tokenizer"] = tokenizer
+
+    import  diffusion_word_freq
+    diffusion_schedule = diffusion_word_freq.create_discrete_diffusion_schedule(hparams['schedule'], num_steps=hparams['num_steps'])
+    diffusion_instance = diffusion_word_freq.MaskDiffusion(
+        dim=tokenizer.vocab_size,
+        schedule=diffusion_schedule,
+        tokenizer=tokenizer,
+        sample_cls=hparams['sample_cls'],
+        word_freq_lambda=hparams['word_freq_lambda'],
+        device=run_opts['device'],
+    )
+    hparams['diffusion_instance'] = diffusion_instance
+    hparams['diffusion_schedule'] = diffusion_schedule
+
+
+    
+   
 
     # 1.  # Dataset prep (parsing Librispeech)
     from word_freq import prepare_word_frequencies  # noqa
@@ -462,6 +480,7 @@ if __name__ == "__main__":
     
     word_freq = word_freq_preprocess_fn(word_freq)
     word_freq[tokenizer.pad_token_id] = 0.  # stable training
+    hparams['word_freq']= word_freq
 
 
 
@@ -475,10 +494,11 @@ if __name__ == "__main__":
         valid_bsampler,
     ) = dataio_prepare(hparams)
 
-    # We download the pretrained LM from HuggingFace (or elsewhere depending on
-    # the path given in the YAML file). The tokenizer is loaded at the same time.
-    run_on_main(hparams["pretrainer"].collect_files)
-    hparams["pretrainer"].load_collected(device=run_opts["device"])
+
+    # # We download the pretrained LM from HuggingFace (or elsewhere depending on
+    # # the path given in the YAML file). The tokenizer is loaded at the same time.
+    # run_on_main(hparams["pretrainer"].collect_files)
+    # hparams["pretrainer"].load_collected(device=run_opts["device"])
 
     # Trainer initialization
     asr_brain = ASR(
