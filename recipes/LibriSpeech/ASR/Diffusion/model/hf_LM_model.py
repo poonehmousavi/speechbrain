@@ -23,13 +23,6 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-class HuggingFace_Tokenizer():
-    def __init__(self, source,save_path):
-       self.source= source
-    #    self.tokenizer = AutoTokenizer.from_pretrained(source, cache_dir=save_path)
-
-
-
 
 class HuggingFace_LM(nn.Module):
     def __init__(
@@ -68,8 +61,8 @@ class HuggingFace_LM(nn.Module):
         elif load_step <= 0:
             self.model = model_cls.from_pretrained(source, config=cfg)
     
-    def forward():
-        pass
+    def forward(self, **kwarg):
+        return self.model(**kwarg)
 
         # TODO: Task1:  Load from ckeckpoint
         # else:

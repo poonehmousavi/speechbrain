@@ -28,103 +28,67 @@ class ASR(sb.core.Brain):
         """Forward computations from the waveform batches to the output probabilities."""
         batch = batch.to(self.device)
         wavs, wav_lens = batch.sig
-        tokens_bos, _ = batch.tokens_bos
-
-        # Add augmentation if specified
-        if stage == sb.Stage.TRAIN:
-            if hasattr(self.modules, "env_corrupt"):
-                wavs_noise = self.modules.env_corrupt(wavs, wav_lens)
-                wavs = torch.cat([wavs, wavs_noise], dim=0)
-                wav_lens = torch.cat([wav_lens, wav_lens])
-                tokens_bos = torch.cat([tokens_bos, tokens_bos], dim=0)
-
-        # compute features
-        feats = self.hparams.compute_features(wavs)
-        current_epoch = self.hparams.epoch_counter.current
-        feats = self.modules.normalize(feats, wav_lens, epoch=current_epoch)
-
-        if stage == sb.Stage.TRAIN:
-            if hasattr(self.hparams, "augmentation"):
-                feats = self.hparams.augmentation(feats)
+        input_ids, _ = batch.tokens
+        attention_mask, _ = batch.attention_mask
+        word_freq_logits, _ = batch.word_freq_logits
+        input_ids, attention_mask, word_freq_logits = input_ids.to(self.device), attention_mask.to(self.device), word_freq_logits.to(self.device)
 
         # forward modules
-        src = self.modules.CNN(feats)
-
-        enc_out, pred = self.modules.Transformer(
-            src, tokens_bos, wav_lens, pad_idx=self.hparams.pad_index,
-        )
-
-        # output layer for ctc log-probabilities
-        logits = self.modules.ctc_lin(enc_out)
-        p_ctc = self.hparams.log_softmax(logits)
-
-        # output layer for seq2seq log-probabilities
-        pred = self.modules.seq_lin(pred)
-        p_seq = self.hparams.log_softmax(pred)
-
-        # Compute outputs
-        hyps = None
         if stage == sb.Stage.TRAIN:
-            hyps = None
-        elif stage == sb.Stage.VALID:
-            hyps = None
-            current_epoch = self.hparams.epoch_counter.current
-            if current_epoch % self.hparams.valid_search_interval == 0:
-                # for the sake of efficiency, we only perform beamsearch with limited capacity
-                # and no LM to give user some idea of how the AM is doing
-                hyps, _ = self.hparams.valid_search(enc_out.detach(), wav_lens)
-        elif stage == sb.Stage.TEST:
-            hyps, _ = self.hparams.test_search(enc_out.detach(), wav_lens)
+            metrics = diffusion_word_freq.compute_kl_reverse_process(
+                input_ids,
+                hparams['diffusion_instance'].sample_t(),
+                denoise_fn= hparams['denoise_fn'],
+                diffusion=hparams['diffusion_instance'],
+                target_mask=attention_mask,
+                hybrid_lambda=hparams['hybrid_lambda'],
+                predict_x0=hparams['predict_x0'],
+                word_freq_logits=word_freq_logits
+            )
+        else:
+            metrics = diffusion_word_freq.discrete_diffusion_elbo(
+                input_ids,
+                denoise_fn= hparams['denoise_fn'],
+                diffusion=hparams['diffusion_instance'],
+                target_mask=attention_mask,
+                normalize_without_padding=True,
+                eval_step_size=hparams['eval_step_size'],
+                word_freq_logits=word_freq_logits,
+                device=self.device
+            )
+    
 
-        return p_ctc, p_seq, wav_lens, hyps
+        return metrics
 
     def compute_objectives(self, predictions, batch, stage):
-        """Computes the loss (CTC+NLL) given predictions and targets."""
+        input_ids, _ = batch.tokens
+        attention_mask, _ = batch.attention_mask
+        word_freq_logits, _ = batch.word_freq_logits
+        input_ids, attention_mask, word_freq_logits = input_ids.to(self.device), attention_mask.to(self.device), word_freq_logits.to(self.device)
 
-        (p_ctc, p_seq, wav_lens, hyps,) = predictions
 
-        ids = batch.id
-        tokens_eos, tokens_eos_lens = batch.tokens_eos
-        tokens, tokens_lens = batch.tokens
+        if stage == sb.Stage.TRAIN:
+            loss = predictions['loss'] / input_ids.shape[0]
+        else:
+            loss = predictions['elbo']/ input_ids.shape[0]
 
-        if hasattr(self.modules, "env_corrupt") and stage == sb.Stage.TRAIN:
-            tokens_eos = torch.cat([tokens_eos, tokens_eos], dim=0)
-            tokens_eos_lens = torch.cat(
-                [tokens_eos_lens, tokens_eos_lens], dim=0
-            )
-            tokens = torch.cat([tokens, tokens], dim=0)
-            tokens_lens = torch.cat([tokens_lens, tokens_lens], dim=0)
 
-        loss_seq = self.hparams.seq_cost(
-            p_seq, tokens_eos, length=tokens_eos_lens
-        ).sum()
 
-        # now as training progresses we use real prediction from the prev step instead of teacher forcing
+        # if stage != sb.Stage.TRAIN:
+        #     current_epoch = self.hparams.epoch_counter.current
+        #     valid_search_interval = self.hparams.valid_search_interval
+        #     if current_epoch % valid_search_interval == 0 or (
+        #         stage == sb.Stage.TEST
+        #     ):
+        #         # Decode token terms to words
+        #         predicted_words = [
+        #             tokenizer.decode_ids(utt_seq).split(" ") for utt_seq in hyps
+        #         ]
+        #         target_words = [wrd.split(" ") for wrd in batch.wrd]
+        #         self.wer_metric.append(ids, predicted_words, target_words)
 
-        loss_ctc = self.hparams.ctc_cost(
-            p_ctc, tokens, wav_lens, tokens_lens
-        ).sum()
-
-        loss = (
-            self.hparams.ctc_weight * loss_ctc
-            + (1 - self.hparams.ctc_weight) * loss_seq
-        )
-
-        if stage != sb.Stage.TRAIN:
-            current_epoch = self.hparams.epoch_counter.current
-            valid_search_interval = self.hparams.valid_search_interval
-            if current_epoch % valid_search_interval == 0 or (
-                stage == sb.Stage.TEST
-            ):
-                # Decode token terms to words
-                predicted_words = [
-                    tokenizer.decode_ids(utt_seq).split(" ") for utt_seq in hyps
-                ]
-                target_words = [wrd.split(" ") for wrd in batch.wrd]
-                self.wer_metric.append(ids, predicted_words, target_words)
-
-            # compute the accuracy of the one-step-forward prediction
-            self.acc_metric.append(p_seq, tokens_eos, tokens_eos_lens)
+        #     # compute the accuracy of the one-step-forward prediction
+        #     self.acc_metric.append(p_seq, tokens_eos, tokens_eos_lens)
         return loss
 
     def on_evaluate_start(self, max_key=None, min_key=None):
@@ -149,11 +113,11 @@ class ASR(sb.core.Brain):
             loss = self.compute_objectives(predictions, batch, stage=stage)
         return loss.detach()
 
-    def on_stage_start(self, stage, epoch):
-        """Gets called at the beginning of each epoch"""
-        if stage != sb.Stage.TRAIN:
-            self.acc_metric = self.hparams.acc_computer()
-            self.wer_metric = self.hparams.error_rate_computer()
+    # def on_stage_start(self, stage, epoch):
+    #     """Gets called at the beginning of each epoch"""
+    #     if stage != sb.Stage.TRAIN:
+    # #         self.acc_metric = self.hparams.acc_computer()
+    #         self.bleu_metric = self.hparams.error_rate_computer()
 
     def on_stage_end(self, stage, stage_loss, epoch):
         """Gets called at the end of a epoch."""
@@ -161,15 +125,16 @@ class ASR(sb.core.Brain):
         stage_stats = {"loss": stage_loss}
         if stage == sb.Stage.TRAIN:
             self.train_stats = stage_stats
-        else:
-            stage_stats["ACC"] = self.acc_metric.summarize()
-            current_epoch = self.hparams.epoch_counter.current
-            valid_search_interval = self.hparams.valid_search_interval
-            if (
-                current_epoch % valid_search_interval == 0
-                or stage == sb.Stage.TEST
-            ):
-                stage_stats["WER"] = self.wer_metric.summarize("error_rate")
+        # else:
+        #       stage_stats["BLEU"] = self.bleu_metric.summarize()
+        #     stage_stats["ACC"] = self.acc_metric.summarize()
+        #     current_epoch = self.hparams.epoch_counter.current
+        #     valid_search_interval = self.hparams.valid_search_interval
+        #     if (
+        #         current_epoch % valid_search_interval == 0
+        #         or stage == sb.Stage.TEST
+        #     ):
+        #         stage_stats["WER"] = self.wer_metric.summarize("error_rate")
 
         # log stats and save checkpoint at end-of-epoch
         if stage == sb.Stage.VALID and sb.utils.distributed.if_main_process():
@@ -190,8 +155,8 @@ class ASR(sb.core.Brain):
                 valid_stats=stage_stats,
             )
             self.checkpointer.save_and_keep_only(
-                meta={"ACC": stage_stats["ACC"], "epoch": epoch},
-                max_keys=["ACC"],
+                meta={"loss": stage_stats["loss"], "epoch": epoch},
+                max_keys=["loss"],
                 num_to_keep=5,
             )
 
@@ -200,15 +165,15 @@ class ASR(sb.core.Brain):
                 stats_meta={"Epoch loaded": self.hparams.epoch_counter.current},
                 test_stats=stage_stats,
             )
-            with open(self.hparams.wer_file, "w") as w:
-                self.wer_metric.write_stats(w)
+            # with open(self.hparams.wer_file, "w") as w:
+            #     self.wer_metric.write_stats(w)
 
             # save the averaged checkpoint at the end of the evaluation stage
             # delete the rest of the intermediate checkpoints
             # ACC is set to 1.1 so checkpointer only keeps the averaged checkpoint
             self.checkpointer.save_and_keep_only(
-                meta={"ACC": 1.1, "epoch": epoch},
-                max_keys=["ACC"],
+                meta={"loss": 1.1, "epoch": epoch},
+                max_keys=["loss"],
                 num_to_keep=1,
             )
 
@@ -343,7 +308,7 @@ def dataio_prepare(hparams):
         input_encodings = tokenizer.encode_plus(wrd, max_length=hparams['max_length'], truncation=True, add_special_tokens=False)
         tokens_list = input_encodings['input_ids']
         yield tokens_list
-        attention_mask = input_encodings['attention_mask']
+        attention_mask = torch.LongTensor(input_encodings['attention_mask'])
         yield attention_mask
         tokens_bos = torch.LongTensor([tokenizer.cls_token_id] + (tokens_list))
         yield tokens_bos
@@ -405,6 +370,32 @@ def word_freq_preprocess_fn(wf):
 
         # range: 0 - 1
         return wf
+
+def generate_sample(output_path, n_samples=10, seq_len=32,temperature =0.1,topk=30, show_process=False, device='cuda'):
+    with open(output_path, 'a+') as fdata:
+        sentences = []
+
+        state = diffusion_word_freq.discrete_diffusion_predict_fn(
+                shape= torch.Size([n_samples, seq_len]),
+                denoise_fn=hparams['denoise_fn'],
+                diffusion=hparams['diffusion_instance'],
+                tokenizer= hparams['tokenizer'],
+                predict_x0=hparams['predict_x0'],
+                sample_cls=hparams['sample_cls'],
+                step_size=hparams['eval_step_size'],
+                topk=topk,
+                target_mask=torch.ones(torch.Size([n_samples, seq_len]), device=device),
+                show_process=show_process,
+                temperature=temperature,
+                device=device
+                        # word_freq=True
+                        # context_fn=context_fn
+                )['final_state']
+        sentence = hparams['tokenizer'].batch_decode(state)
+        sentences.extend(sentence)
+        # print(sentence)
+        for s in sentence:
+            print(s, file=fdata, flush=True)
 
 
 if __name__ == "__main__":
@@ -482,6 +473,47 @@ if __name__ == "__main__":
     word_freq[tokenizer.pad_token_id] = 0.  # stable training
     hparams['word_freq']= word_freq
 
+    cls = torch.full((1, 1), fill_value=tokenizer.cls_token_id, device=run_opts['device'])
+    sep = torch.full((1, 1), fill_value=tokenizer.sep_token_id, device=run_opts['device'])
+
+    att_ones = torch.ones((1, 1), device=run_opts['device'])
+    att_zeros = torch.zeros((1, 1), device=run_opts['device'])
+
+    if  hparams['timestep'] == 'none':
+        def denoise_fn(targets, timestep, attention_mask):
+            assert len(targets.size()) == 2  # bsz * seqlen
+            bsz = targets.size(0)
+            targets = torch.cat((cls.repeat(bsz, 1), targets, sep.repeat(bsz, 1)), dim=1)
+            attention_mask = torch.cat((att_ones.repeat(bsz, 1), attention_mask, att_zeros.repeat(bsz, 1)), dim=1)
+            return hparams['lm_model'](input_ids=targets, timestep=timestep - 1, attention_mask=attention_mask)['logits'][:, 1:-1, :]
+    elif hparams['timestep'] == 'token':
+
+        def denoise_fn(targets, timestep, attention_mask):
+            assert len(targets.size()) == 2  # bsz * seqlen
+            bsz = targets.size(0)
+            targets = torch.cat((
+                cls.repeat(bsz, 1),
+                torch.full((bsz, 1), fill_value=timestep.item() + 110, device=run_opts['device']),
+                targets,
+                sep.repeat(bsz, 1)
+            ), dim=1)
+            attention_mask = torch.cat((att_ones.repeat(bsz, 2), attention_mask, att_zeros.repeat(bsz, 1)), dim=1)
+            return hparams['lm_model'](input_ids=targets, timestep=timestep - 1, attention_mask=attention_mask)['logits'][:, 2:-1, :]
+    elif hparams['timestep'] == 'layerwise':
+        def denoise_fn(targets, timestep, attention_mask):
+            assert len(targets.size()) == 2  # bsz * seqlen
+            bsz = targets.size(0)
+            targets = torch.cat((
+                cls.repeat(bsz, 1),
+                targets,
+                sep.repeat(bsz, 1)
+            ), dim=1)
+            attention_mask = torch.cat((att_ones.repeat(bsz, 1), attention_mask, att_zeros.repeat(bsz, 1)), dim=1)
+            return hparams['lm_model'](input_ids=targets, timestep=timestep - 1, attention_mask=attention_mask)['logits'][:, 1:-1, :]
+    else:
+        raise NotImplementedError
+    hparams['denoise_fn'] = denoise_fn
+
 
 
     # here we create the datasets objects as well as tokenization and encoding
@@ -531,7 +563,7 @@ if __name__ == "__main__":
         train_loader_kwargs=train_dataloader_opts,
         valid_loader_kwargs=valid_dataloader_opts,
     )
-
+    hparams['diffusion_instance'].word_freq = word_freq.to(run_opts['device'])
     # Testing
     for k in test_datasets.keys():  # keys are test_clean, test_other etc
         asr_brain.hparams.wer_file = os.path.join(
@@ -539,6 +571,8 @@ if __name__ == "__main__":
         )
         asr_brain.evaluate(
             test_datasets[k],
-            max_key="ACC",
+            max_key="loss",
             test_loader_kwargs=hparams["test_dataloader_opts"],
         )
+    
+    generate_sample(hparams['sample_file'], n_samples=hparams['n_samples'], seq_len=hparams['seq_len'],temperature= hparams['temperature'],topk=hparams['topk'], show_process=hparams['show_process'], device=run_opts['device'])

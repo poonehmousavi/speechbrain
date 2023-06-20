@@ -8,25 +8,13 @@ import abc
 import numpy as np
 from typing import Any
 import utils
-# from transformers import AutoTokenizer, top_k_top_p_filtering
+from transformers import  top_k_top_p_filtering
 # from dataclasses import dataclass
 import logging
-
+import losses 
+from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
-class DiffusionSchedule:
-    """A wrapper around a simple schedule function."""
-
-    def __init__(self, schedule_fn, num_steps, is_constant=False):
-        self._schedule_fn = schedule_fn
-        self.num_steps = num_steps
-        self.is_constant = is_constant
-
-    def __call__(self, step):
-        return self._schedule_fn(step)
-
-    def __repr__(self):
-        return f"DiffusionSchedule(steps: {self.num_steps}, is_constant: {self.is_constant})"
 
 class DiscreteDiffusionBase(abc.ABC):
     num_steps: int
@@ -468,6 +456,20 @@ class MaskDiffusion(DiscreteDiffusionMatrixBase):
         return not self.use_fast_inference
 
 
+class DiffusionSchedule:
+    """A wrapper around a simple schedule function."""
+
+    def __init__(self, schedule_fn, num_steps, is_constant=False):
+        self._schedule_fn = schedule_fn
+        self.num_steps = num_steps
+        self.is_constant = is_constant
+
+    def __call__(self, step):
+        return self._schedule_fn(step)
+
+    def __repr__(self):
+        return f"DiffusionSchedule(steps: {self.num_steps}, is_constant: {self.is_constant})"
+
 def create_discrete_diffusion_schedule(
         kind="linear",
         beta_min=1e-3,
@@ -527,3 +529,431 @@ def create_discrete_diffusion_schedule(
         return DiffusionSchedule(schedule_fn, num_steps, is_constant=False)
     else:
         raise ValueError(f"kind {kind} is not supported.")
+
+def p_forward(
+        denoise_fn,
+        target_mask,
+        x_t,
+        t,
+        diffusion,
+        predict_x0=True,
+        return_x0=False,
+        return_logits=False,
+        special_case_x0=False,
+        transition_probs=None,
+        transition_probs_in_logits=True,
+        maximum_likelihood=False,
+        epsilon=1e-20,
+        step_size=1,
+        word_freq_logits=None
+):
+    """Returns probabilities from the reverse process p(x_{t-1} | x_t).
+    Args:
+    denoise_fn: the reverse process. Must support embed, call, and attend.
+    x_t: the current value of x_t to condition on.
+    t: the timestep t.
+    diffusion: the Diffusion object to use for noise.
+    predict_x0: if True, assumes the model output corresponds to its prediction
+      for p(x_0 | x_t). Otherwise assumes model predicts p(x_{t-1} | x_t).
+    return_x0: if True, will return probs for x_0 as well as x_{t-1}.
+    return_logits: if True, will return logits instead of probabilities.
+    special_case_x0: if True, will directly predict x0 instead of using the
+      forward process probabilities.
+    transition_probs: if provided, q(x_{t+1} | x_t) probs to reuse.
+    transition_probs_in_logits: if False, will ignore transition probs in logits
+      (only allowed if return_logits is True). This is because this term is
+      independent of theta.
+    maximum_likelihood: if true, will draw the most likely x0 before applying
+      the forward process.
+    epsilon: a small number.
+    step_size: step size to compute posterior from.
+    Returns:
+    probabilities for q(x_{t-1} | x_t) (and probabilities for x0 if predict_x0
+    is True)
+    """
+    assert not (step_size > 1 and not predict_x0)
+
+    logits = denoise_fn(targets=x_t, timestep=t, attention_mask=target_mask)
+    probs = torch.nn.Softmax(dim=-1)(logits)
+
+    if not predict_x0:
+        retval = logits if return_logits else probs
+        if return_x0:
+            return retval, None
+        else:
+            return retval
+
+    if maximum_likelihood:
+        probs = probs.argmax(-1)
+
+    # we use this to compute p(x_{t-1} | x_t) = sum_x0 q(x_{t-1} | x_t, x_0)
+    # p(x_0 | x_t).
+    qt_probs, _ = diffusion.sample_and_compute_posterior_q(
+        x_0=probs,
+        t=t - step_size,
+        return_logits=return_logits,
+        make_one_hot=maximum_likelihood,
+        transition_probs_in_logits=transition_probs_in_logits,
+        transition_probs=transition_probs,
+        samples=x_t,
+        epsilon=epsilon,
+        step_size=step_size,
+        word_freq_logits=word_freq_logits
+    )
+
+    retval_x0 = logits if return_logits else probs
+    retval = qt_probs
+
+    # we can special case t = 1 to just use the raw logits outputs.
+    mask = ((t == step_size) & special_case_x0).long()
+    retval = mask * retval_x0 + (1 - mask) * retval
+    # retval = retval_x0 if t == step_size else retval
+
+    if return_x0:
+        return retval, retval_x0
+    else:
+        return retval
+
+def compute_kl_reverse_process(x_start,
+                               t,
+                               *,
+                               diffusion,
+                               denoise_fn,
+                               predict_x0=True,
+                               log_space=False,
+                               hybrid_lambda=0.0,
+                               use_cached_transition=True,
+                               target_mask=None,
+                               word_freq_logits=None,
+                               step_size=1,
+                               device=None):
+    """Returns the KL for one term in the ELBO (time t) (loss L_t).
+    This assumes x_start is a sample from x_0, from which we draw samples from
+    q(x_t | x_0) and then compute q(x_{t-1} | x_t, x_0) following the LaTeX. This
+    is the KL divergence for terms L_1 through L_{T-1}.
+    Args:
+    x_start: a sample from p(data) (or q(x_0)).
+    t: the loss term to compute.
+    diffusion: the diffusion object to use.
+    denoise_fn: a functool.partial-ed version of the model_apply function which
+      takes a set of targets (x_t) and noise level and returns q(x_{t-1} | x_t,
+      x_0).
+    predict_x0: if True, will predict a distribution over x0 instead of x_{t-1}.
+    log_space: if True, will perform the loss calculations in log space.
+    label_smoothing: label smoothing for cross entropy.
+    hybrid_lambda: coefficient for hybrid cross-entropy loss.
+    use_cached_transition: if True, will reuse q(x_{t+1} | x_t) computation.
+    target_mask: mask for target sequence.
+    step_size: the step size over which the ELBO is computed.
+    Returns:
+    the KL divergence and denominator.
+    """
+
+    if step_size > 1 and not predict_x0:
+        raise ValueError("cannot skip steps when not predicting x0.")
+
+    # sample from q(x_{t+1} | x_start), then compute q(x_t | x_{t+1}, x_start)
+    # q_t and p_t can be logits or probs depending on log_space.
+    q_t, x_t_plus_1, transition_probs = diffusion.sample_and_compute_posterior_q(
+        x_start,
+        t,
+        return_logits=log_space,
+        return_transition_probs=True,
+        step_size=step_size,
+        word_freq_logits=word_freq_logits,
+    )
+
+    transition_probs = transition_probs if use_cached_transition else None
+
+    p_t = p_forward(
+        denoise_fn,
+        target_mask,
+        x_t_plus_1,
+        t + step_size,
+        diffusion,
+        predict_x0=predict_x0,
+        return_x0=predict_x0 and hybrid_lambda > 0.0,
+        return_logits=log_space,
+        transition_probs=transition_probs,
+        step_size=step_size,
+        word_freq_logits=word_freq_logits
+    )
+
+    if predict_x0 and hybrid_lambda > 0.0:
+        p_t, p_0 = p_t
+        if log_space:
+            cross_entropy = losses.cross_entropy_with_logits(logits=p_0, targets=x_start)
+        else:
+            cross_entropy = losses.cross_entropy_with_probs(probs=p_0, targets=x_start)
+
+        hybrid_loss = hybrid_lambda * cross_entropy
+    else:
+        hybrid_loss = torch.tensor([0.], device=device)
+
+    if log_space:
+        kl = losses.kl_divergence_with_logits(q_t, p_t)
+        cross_entropy = losses.cross_entropy_with_logits(logits=p_t, targets=x_start)
+    else:
+        kl = losses.kl_divergence_with_probs(q_t, p_t)
+        cross_entropy = losses.cross_entropy_with_probs(probs=p_t, targets=x_start)
+
+    if target_mask is not None:
+        kl = (kl * target_mask).sum()
+        cross_entropy = (cross_entropy * target_mask).sum()
+        hybrid_loss = (hybrid_loss * target_mask).sum()
+    else:
+        kl = kl.sum()
+        cross_entropy = cross_entropy.sum()
+        hybrid_loss = hybrid_loss.sum()
+
+    mask = (t == 0).long()
+    base_loss = mask * cross_entropy + (1 - mask) * kl
+    loss = base_loss + hybrid_loss
+    denominator = 1
+    metrics_dict = {
+        "loss": loss,
+        "denominator": denominator,
+        "hybrid_loss": hybrid_loss,
+        "base_loss": base_loss,
+        "cross_entropy_loss": cross_entropy,
+        "t0_loss": mask * cross_entropy,
+        "kl_loss": kl,
+    }
+
+    return metrics_dict
+
+def compute_prior_kl(x_start, diffusion, target_mask=None, word_freq_logits=None):
+    """Computes KL divergence between q(x_T) and the true distribution."""
+
+    num_steps = diffusion.num_steps
+
+    q_probs = diffusion.get_qt_given_q0(q0=x_start, t=num_steps, return_logits=False, make_one_hot=True, word_freq_logits=word_freq_logits)  # get end step
+    p_probs = diffusion.stationary_probs(q_probs.shape[:-1])
+
+    loss = losses.kl_divergence_with_probs(q_probs, p_probs)
+
+    if target_mask is not None:
+        loss = (loss * target_mask).sum()
+    else:
+        loss = loss.sum()
+
+    return loss, 1
+
+def discrete_diffusion_elbo(
+        x_start,
+        *,
+        denoise_fn,
+        diffusion,
+        target_mask,
+        word_freq_logits,
+        predict_x0=True,
+        length_probs=None,
+        normalize_without_padding=True,
+        eval_step_size=1,
+        device=None,
+):
+    """Computes the ELBO likelihood bound for discrete diffusion models.
+    Pseudocode:
+    1. starting at t = T and going towards t = 0:
+    2. sample P(x_t | x_0)
+    3. use NN to compute P(x_{t-1} | x_t)
+    4. get q(x_{t-1} | x_t, x_0)
+    5. compute KL divergence
+    6. At T = 0, get discrete log likelihoods
+    Args:
+    x_start: data point.
+    denoise_fn: the denoise_fn function (including params).
+    diffusion: the noise schedule object.
+    target_mask: mask for padding targets
+    predict_x0: if True, assumes the neural net predicts x0.
+    length_probs: list of probabilities for each sequence length.
+    normalize_without_padding: if True, ignore padding when normalizing.
+    eval_step_size: step size for evaluation.
+    return_all_likelihoods: if True, will return all likelihoods for all timesteps.
+    Returns:
+    the full ELBO bound.
+    """
+    assert diffusion.num_steps % eval_step_size == 0
+    assert diffusion.num_steps > eval_step_size
+
+    @dataclass
+    class State:
+        t: Any
+        log_likelihood: Any
+
+    def elbo_body_fn(state, _):
+        metrics_dict = compute_kl_reverse_process(
+            x_start,
+            state.t,
+            denoise_fn=denoise_fn,
+            diffusion=diffusion,
+            predict_x0=predict_x0,
+            target_mask=target_mask,
+            hybrid_lambda=0.0,
+            step_size=eval_step_size,
+            word_freq_logits=word_freq_logits,
+            device=device
+        )
+
+        log_likelihood = metrics_dict["base_loss"] / metrics_dict["denominator"]
+
+        return State(
+            t=state.t - eval_step_size,
+            log_likelihood=state.log_likelihood + log_likelihood,
+        ), None
+
+    init_state = State(
+        t=torch.tensor([diffusion.num_steps - eval_step_size], device=device),
+        log_likelihood=torch.tensor(0.0, device=device),
+    )
+
+    num_steps = diffusion.num_steps // eval_step_size
+
+    final_state, _ = utils.scan(elbo_body_fn, init_state, None, num_steps)
+
+    log_likelihood = final_state.log_likelihood
+
+    prior, denominator = compute_prior_kl(x_start, diffusion, target_mask=target_mask, word_freq_logits=word_freq_logits)
+
+    if target_mask is not None:
+        target_length = torch.count_nonzero(target_mask)
+    else:
+        target_length = None
+
+    if length_probs is not None:
+        length_probs = torch.tensor(length_probs, device=device)
+        length_log_likelihood = -torch.log(length_probs[target_length])
+    else:
+        length_log_likelihood = 0.0
+
+    elbo = log_likelihood + length_log_likelihood + prior / denominator
+
+    elbo_length = target_length if normalize_without_padding else x_start.size(-1)
+
+    return {
+        "elbo": elbo,
+        "elbo_in_bits_per_dim": elbo / (np.log(2) * elbo_length),
+        "likelihood": log_likelihood,
+        "prior": prior,
+        "length_likelihood": length_log_likelihood,
+        "nn/num_steps": num_steps,
+    }
+
+def discrete_diffusion_predict_fn(
+    shape,
+    denoise_fn,
+    diffusion,
+    tokenizer,
+    target_mask=None,
+    predict_x0=False,
+    use_maximum_likelihood_decoding=False,
+    step_size=1,
+    topk=0,
+    topp=-1.0,
+    context_fn=None,
+    sample_cls=None,
+    show_process=False,
+    temperature=1.0,
+    device = 'cuda'
+):
+    """Predict an image or text from a diffusion model.
+
+  Args:
+    params: a PyTree of parameters for the model.
+    rng_key: an RNG key.
+    targets: ignored, used for shape info.
+    model: the Flax model to use.
+    dataset_info: the Problem object for the current task.
+    diffusion: the noise schedule to use to condition the prediction steps.
+    diffusion_state: if provided, a state object used by the diffusion class.
+    inputs: if provided, used to condition the prediction.
+    return_intermediates: if True, uses lax.scan to return all intermediate
+      steps in the reverse process.
+    predict_x0: if True, will predict a distribution over x_0 instead of x_{t-1}
+      which allows for the number of inference steps to be varied after
+      training.
+    use_maximum_likelihood_decoding: if True, will take the maximum likelihood
+      sample instead of sampling from the posterior. Will tend to produce very
+      trivial results, unless predict_x0 is True.
+    mask_padding: if True, mask out padding tokens.
+    predict_completions: if True, instead of predicting from x_T, predict from
+      other points x_t for each possible t. Returns different metrics and
+      shapes.
+    step_size: tne size of each inference step (step_size > 1 skips steps).
+
+  Returns:
+    a dictionary containing metrics and information about the prediction
+      process.
+  """
+
+    num_steps = diffusion.num_steps
+    assert num_steps % step_size == 0
+    assert step_size < num_steps
+
+    @dataclass
+    class SamplingState:
+        x: torch.Tensor  # current predicted seqeunce
+        x0: Any  # only used if predict_x0 is true
+        t: int  # current step
+
+
+    length = shape[-1]
+
+
+    def sampling_step(step, state):
+        del step
+
+        t = state.t  # initially, num_steps, and decreases from there.
+
+        logits, x0_logits = p_forward(
+            denoise_fn,
+            target_mask,
+            x_t=state.x,
+            t=t,
+            diffusion=diffusion,
+            predict_x0=predict_x0,
+            return_x0=True,
+            return_logits=True,
+            maximum_likelihood=use_maximum_likelihood_decoding,
+            step_size=step_size
+        )
+
+        if x0_logits is not None:
+            x0 = x0_logits.argmax(-1)
+        else:
+            x0 = None
+
+        # logits = torch.nn.functional.gumbel_softmax(logits, tau=2)
+
+        logits = logits / temperature
+        logits = top_k_top_p_filtering(logits, top_k=topk, top_p=topp)
+
+        sample = torch.distributions.categorical.Categorical(logits=logits).sample()
+        if show_process:
+            print(tokenizer.batch_decode(x0, clean_up_tokenization_spaces=False))
+
+        return SamplingState(x=sample, x0=x0, t=t - step_size)
+
+    x = diffusion.sample_stationary(shape)
+    if context_fn is not None:
+        x = context_fn(x)
+
+    if predict_x0:
+        init_state = SamplingState(x, x, torch.tensor([num_steps], device=device))
+    else:
+        init_state = SamplingState(x, None, torch.tensor([num_steps], device=device))
+
+    total_steps = num_steps // step_size
+
+    final_state = utils.fori_loop(0, total_steps, sampling_step, init_state)
+
+    predictions = {
+        "final_state": final_state.x,
+        "initial_state": init_state.x,
+        "scalar/num_steps": num_steps,
+        "scalar/length": length,
+        "scalar/total_steps": total_steps,
+    }
+
+    return predictions
+
