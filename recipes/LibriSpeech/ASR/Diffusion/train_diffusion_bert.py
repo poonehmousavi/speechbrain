@@ -72,23 +72,6 @@ class ASR(sb.core.Brain):
         else:
             loss = predictions['elbo']/ input_ids.shape[0]
 
-
-
-        # if stage != sb.Stage.TRAIN:
-        #     current_epoch = self.hparams.epoch_counter.current
-        #     valid_search_interval = self.hparams.valid_search_interval
-        #     if current_epoch % valid_search_interval == 0 or (
-        #         stage == sb.Stage.TEST
-        #     ):
-        #         # Decode token terms to words
-        #         predicted_words = [
-        #             tokenizer.decode_ids(utt_seq).split(" ") for utt_seq in hyps
-        #         ]
-        #         target_words = [wrd.split(" ") for wrd in batch.wrd]
-        #         self.wer_metric.append(ids, predicted_words, target_words)
-
-        #     # compute the accuracy of the one-step-forward prediction
-        #     self.acc_metric.append(p_seq, tokens_eos, tokens_eos_lens)
         return loss
 
     def on_evaluate_start(self, max_key=None, min_key=None):
@@ -125,6 +108,21 @@ class ASR(sb.core.Brain):
         stage_stats = {"loss": stage_loss}
         if stage == sb.Stage.TRAIN:
             self.train_stats = stage_stats
+        
+        else:
+            # show_process = True if stage == sb.Stage.TEST else False
+            show_process=False
+            file_name = "sample_test.txt" if stage == sb.Stage.TEST else f'sample_epoch_{self.hparams.epoch_counter.current}.txt'
+            dataset= test_datasets['test-clean'] if stage == sb.Stage.TEST else valid_data
+            sample_file = os.path.join(hparams['sample_folder'],file_name)
+            generate_sample(sample_file, n_samples=hparams['n_samples'], seq_len=hparams['seq_len'],temperature= hparams['temperature'],topk=hparams['topk'], show_process=show_process, device=run_opts['device'])
+            self_bleu, bleu, dist1, div4 = calculate_metric(sample_file,dataset)
+            stage_stats["self_bleu"] = self_bleu
+            stage_stats["bleu"] = bleu
+            stage_stats["dist1"] = dist1
+            stage_stats["div4"] = div4
+        
+
         # else:
         #       stage_stats["BLEU"] = self.bleu_metric.summarize()
         #     stage_stats["ACC"] = self.acc_metric.summarize()
@@ -397,6 +395,13 @@ def generate_sample(output_path, n_samples=10, seq_len=32,temperature =0.1,topk=
         for s in sentence:
             print(s, file=fdata, flush=True)
 
+import compute_metric 
+def calculate_metric(sample_file, refernce_dataset):
+    self_bleu = compute_metric.self_bleu_for_unconditional_generation(sample_file)
+    dist1 = compute_metric.dist1(sample_file)
+    div4 = compute_metric.div4(sample_file)
+    bleu= compute_metric.compute_quality_in_unconditional_gen(refernce_dataset,sample_file)
+    return self_bleu, bleu, dist1, div4
 
 if __name__ == "__main__":
     # CLI:
@@ -408,8 +413,7 @@ if __name__ == "__main__":
     # create ddp_group with the right communication protocol
     sb.utils.distributed.ddp_init_group(run_opts)
 
-    # 1.  # Dataset prep (parsing Librispeech)
-    from librispeech_prepare import prepare_librispeech  # noqa
+
 
     # Create experiment directory
     sb.create_experiment_directory(
@@ -418,6 +422,11 @@ if __name__ == "__main__":
         overrides=overrides,
     )
 
+    if not os.path.isdir(hparams['sample_folder']):
+       os.makedirs(hparams['sample_folder'])
+    
+    # 1.  # Dataset prep (parsing Librispeech)
+    from librispeech_prepare import prepare_librispeech  # noqa
     # multi-gpu (ddp) save data preparation
     run_on_main(
         prepare_librispeech,
@@ -433,11 +442,10 @@ if __name__ == "__main__":
         },
     )
 
-    # tokenizer = AutoTokenizer.from_pretrained(hparams["pretrained_lm_tokenizer_path"])
-    # hparams["tokenizer"] = tokenizer
     tokenizer =  hparams['lm_model'].tokenizer
     hparams["tokenizer"] = tokenizer
-
+    
+    # 4. #generate diffusion instance for handling adding/removing noise
     import  diffusion_word_freq
     diffusion_schedule = diffusion_word_freq.create_discrete_diffusion_schedule(hparams['schedule'], num_steps=hparams['num_steps'])
     diffusion_instance = diffusion_word_freq.MaskDiffusion(
@@ -452,10 +460,8 @@ if __name__ == "__main__":
     hparams['diffusion_schedule'] = diffusion_schedule
 
 
-    
-   
 
-    # 1.  # Dataset prep (parsing Librispeech)
+    # 3.  # calculate word-freq for tokens in training data ti be used in Spindle noise schedule
     from word_freq import prepare_word_frequencies  # noqa
     run_on_main(
         prepare_word_frequencies,
@@ -479,6 +485,7 @@ if __name__ == "__main__":
     att_ones = torch.ones((1, 1), device=run_opts['device'])
     att_zeros = torch.zeros((1, 1), device=run_opts['device'])
 
+    # define denoise funstion based on the how time-step is incorporated in the model
     if  hparams['timestep'] == 'none':
         def denoise_fn(targets, timestep, attention_mask):
             assert len(targets.size()) == 2  # bsz * seqlen
@@ -514,6 +521,7 @@ if __name__ == "__main__":
         raise NotImplementedError
     hparams['denoise_fn'] = denoise_fn
 
+    hparams['diffusion_instance'].word_freq = word_freq.to(run_opts['device'])
 
 
     # here we create the datasets objects as well as tokenization and encoding
@@ -563,16 +571,16 @@ if __name__ == "__main__":
         train_loader_kwargs=train_dataloader_opts,
         valid_loader_kwargs=valid_dataloader_opts,
     )
-    hparams['diffusion_instance'].word_freq = word_freq.to(run_opts['device'])
     # Testing
     for k in test_datasets.keys():  # keys are test_clean, test_other etc
-        asr_brain.hparams.wer_file = os.path.join(
-            hparams["output_folder"], "wer_{}.txt".format(k)
-        )
         asr_brain.evaluate(
             test_datasets[k],
             max_key="loss",
             test_loader_kwargs=hparams["test_dataloader_opts"],
         )
     
-    generate_sample(hparams['sample_file'], n_samples=hparams['n_samples'], seq_len=hparams['seq_len'],temperature= hparams['temperature'],topk=hparams['topk'], show_process=hparams['show_process'], device=run_opts['device'])
+    # sample_file = os.path.join(hparams['sample_folder'],'sample_test.txt')
+    # generate_sample(sample_file, n_samples=hparams['n_samples'], seq_len=hparams['seq_len'],temperature= hparams['temperature'],topk=hparams['topk'], show_process=True, device=run_opts['device'])
+    # calculate_metric(sample_file, test_datasets['test-clean'])
+
+ 

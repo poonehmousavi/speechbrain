@@ -1,2 +1,4 @@
 transformers
 datasest
+nltk
+torchmetrics
