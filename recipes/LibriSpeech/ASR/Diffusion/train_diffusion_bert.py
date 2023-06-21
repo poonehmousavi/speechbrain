@@ -70,24 +70,23 @@ class ASR(sb.core.Brain):
         if stage == sb.Stage.TRAIN:
             loss = predictions['loss'] / input_ids.shape[0]
         else:
-            loss = predictions['elbo']/ input_ids.shape[0]
+            loss = predictions['elbo_in_bits_per_dim']/ input_ids.shape[0]
 
         return loss
 
-    def on_evaluate_start(self, max_key=None, min_key=None):
-        """perform checkpoint averge if needed"""
-        super().on_evaluate_start()
+    # def on_evaluate_start(self, max_key=None, min_key=None):
+    #     """perform checkpoint averge if needed"""
+    #     super().on_evaluate_start()
 
-        ckpts = self.checkpointer.find_checkpoints(
-            max_key=max_key, min_key=min_key
-        )
-        ckpt = sb.utils.checkpoints.average_checkpoints(
-            ckpts, recoverable_name="model", device=self.device
-        )
+    #     ckpts = self.checkpointer.find_checkpoints(
+    #         max_key=max_key, min_key=min_key
+    #     )
+    #     ckpt = sb.utils.checkpoints.average_checkpoints(
+    #         ckpts, recoverable_name="model", device=self.device
+    #     )
 
-        self.hparams.model.load_state_dict(ckpt, strict=True)
-        self.hparams.model.eval()
-        print("Loaded the average")
+    #     self.hparams.model.load_state_dict(ckpt, strict=True)
+    #     self.hparams.model.eval()
 
     def evaluate_batch(self, batch, stage):
         """Computations needed for validation/test batches"""
@@ -95,12 +94,6 @@ class ASR(sb.core.Brain):
             predictions = self.compute_forward(batch, stage=stage)
             loss = self.compute_objectives(predictions, batch, stage=stage)
         return loss.detach()
-
-    # def on_stage_start(self, stage, epoch):
-    #     """Gets called at the beginning of each epoch"""
-    #     if stage != sb.Stage.TRAIN:
-    # #         self.acc_metric = self.hparams.acc_computer()
-    #         self.bleu_metric = self.hparams.error_rate_computer()
 
     def on_stage_end(self, stage, stage_loss, epoch):
         """Gets called at the end of a epoch."""
@@ -123,19 +116,7 @@ class ASR(sb.core.Brain):
             stage_stats["div4"] = div4
         
 
-        # else:
-        #       stage_stats["BLEU"] = self.bleu_metric.summarize()
-        #     stage_stats["ACC"] = self.acc_metric.summarize()
-        #     current_epoch = self.hparams.epoch_counter.current
-        #     valid_search_interval = self.hparams.valid_search_interval
-        #     if (
-        #         current_epoch % valid_search_interval == 0
-        #         or stage == sb.Stage.TEST
-        #     ):
-        #         stage_stats["WER"] = self.wer_metric.summarize("error_rate")
-
-        # log stats and save checkpoint at end-of-epoch
-        if stage == sb.Stage.VALID and sb.utils.distributed.if_main_process():
+        if stage == sb.Stage.VALID :
 
             lr = self.hparams.noam_annealing.current_lr
             steps = self.optimizer_step
@@ -154,8 +135,7 @@ class ASR(sb.core.Brain):
             )
             self.checkpointer.save_and_keep_only(
                 meta={"loss": stage_stats["loss"], "epoch": epoch},
-                max_keys=["loss"],
-                num_to_keep=5,
+                min_keys=["loss"]
             )
 
         elif stage == sb.Stage.TEST:
@@ -163,17 +143,16 @@ class ASR(sb.core.Brain):
                 stats_meta={"Epoch loaded": self.hparams.epoch_counter.current},
                 test_stats=stage_stats,
             )
-            # with open(self.hparams.wer_file, "w") as w:
-            #     self.wer_metric.write_stats(w)
+
 
             # save the averaged checkpoint at the end of the evaluation stage
             # delete the rest of the intermediate checkpoints
             # ACC is set to 1.1 so checkpointer only keeps the averaged checkpoint
-            self.checkpointer.save_and_keep_only(
-                meta={"loss": 1.1, "epoch": epoch},
-                max_keys=["loss"],
-                num_to_keep=1,
-            )
+            # self.checkpointer.save_and_keep_only(
+            #     meta={"loss": 1.1, "epoch": epoch},
+            #     max_keys=["loss"],
+            #     num_to_keep=1,
+            # )
 
     def fit_batch(self, batch):
 
@@ -413,8 +392,6 @@ if __name__ == "__main__":
     # create ddp_group with the right communication protocol
     sb.utils.distributed.ddp_init_group(run_opts)
 
-
-
     # Create experiment directory
     sb.create_experiment_directory(
         experiment_directory=hparams["output_folder"],
@@ -578,9 +555,6 @@ if __name__ == "__main__":
             max_key="loss",
             test_loader_kwargs=hparams["test_dataloader_opts"],
         )
-    
-    # sample_file = os.path.join(hparams['sample_folder'],'sample_test.txt')
-    # generate_sample(sample_file, n_samples=hparams['n_samples'], seq_len=hparams['seq_len'],temperature= hparams['temperature'],topk=hparams['topk'], show_process=True, device=run_opts['device'])
-    # calculate_metric(sample_file, test_datasets['test-clean'])
+
 
  
