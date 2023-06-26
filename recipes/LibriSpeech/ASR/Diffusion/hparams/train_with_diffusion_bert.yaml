@@ -19,7 +19,7 @@ train_log: !ref <output_folder>/train_log.txt
 # tokenizer used for LM training. Here, we download everything from the
 #BERT tokenizer. However, a local path pointing to a
 lm_source: bert-base-uncased
-lm_folder: !ref <save_folder>
+lm_folder: !ref <save_folder>/bert
 timestep: layerwise
 
 max_length : 128
@@ -33,20 +33,20 @@ data_folder: ./data/LibriSpeech # e.g., /path/to/LibriSpeech
 # then data_folder_rirs should be /localscratch/xxx_corpus
 # otherwise the dataset will automatically be downloaded
 # data_folder_rirs: !ref <data_folder>
-train_splits: ["train-clean-100", "train-clean-360", "train-other-500"]
-# train_splits: ["train-clean-100"]
+# train_splits: ["train-clean-100", "train-clean-360", "train-other-500"]
+train_splits: ["train-clean-100"]
 
 dev_splits: ["dev-clean"]
-test_splits: ["test-clean", "test-other"]
-# test_splits: ["test-clean"]
+# test_splits: ["test-clean", "test-other"]
+test_splits: ["test-clean"]
 skip_prep: False
 train_csv: !ref <output_folder>/train.csv
 valid_csv: !ref <output_folder>/dev-clean.csv
-test_csv:
-    - !ref <output_folder>/test-clean.csv
-    - !ref <output_folder>/test-other.csv
-# test_csv: 
+# test_csv:
 #     - !ref <output_folder>/test-clean.csv
+#     - !ref <output_folder>/test-other.csv
+test_csv: 
+    - !ref <output_folder>/test-clean.csv
 
 # Samples setting
 sample_folder: !ref <output_folder>/samples/
@@ -63,7 +63,7 @@ ckpt_interval_minutes: 30 # save checkpoint every N min
 # The global batch size is computed as batch_size * n_gpus * gradient_accumulation.
 # Empirically, we found that this value should be >= 128.
 # Please, set your parameters accordingly.
-number_of_epochs: 3
+number_of_epochs: 10
 batch_size: 32 # This works for 1x GPU with 40GB with no dynamic batching
 test_batch_size: 32
 grad_accumulation_factor: 1
@@ -88,7 +88,7 @@ dynamic_batch_sampler:
     max_batch_ex: 128
 
 # stages related parameters
-lr_adam: 5e-5
+lr_adam: 1e-1
 
 # Feature parameters
 sample_rate: 16000
@@ -142,7 +142,7 @@ model: !new:torch.nn.ModuleList
 
 
 # define two optimizers here for two-stage training
-Adam: !name:torch.optim.AdamW
+Adam: !name:torch.optim.Adam
     lr: !ref <lr_adam>
     betas: (0.9, 0.98)
     eps: 0.000000001

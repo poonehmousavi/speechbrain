@@ -930,13 +930,16 @@ def discrete_diffusion_predict_fn(
 
         sample = torch.distributions.categorical.Categorical(logits=logits).sample()
         if show_process:
-            print(tokenizer.batch_decode(x0, clean_up_tokenization_spaces=False))
+            logger.debug(tokenizer.batch_decode(x0, clean_up_tokenization_spaces=False))
 
         return SamplingState(x=sample, x0=x0, t=t - step_size)
 
     x = diffusion.sample_stationary(shape)
     if context_fn is not None:
         x = context_fn(x)
+
+    if show_process:
+        logger.debug(tokenizer.batch_decode(x, clean_up_tokenization_spaces=False))
 
     if predict_x0:
         init_state = SamplingState(x, x, torch.tensor([num_steps], device=device))
