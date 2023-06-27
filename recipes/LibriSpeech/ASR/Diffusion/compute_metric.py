@@ -80,7 +80,7 @@ def get_bleu(recover, reference):
 
 def compute_quality_in_unconditional_gen(test_data, file_name):
     # test_data = datasets.load_dataset('lm1b', split='test')
-    corpus = [[d['wrd'].split(' ') for d in test_data]]
+    corpus = [[d['wrd'].lower().split(' ') for d in test_data]]
 
     with open(file_name, 'r') as f:
         data = [line.strip().split(' ') for line in f.readlines()]
