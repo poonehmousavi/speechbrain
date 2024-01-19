@@ -26,7 +26,7 @@ INITIAL_LOG_LOSS_SCALE = 20.0
 CheckpointState = collections.namedtuple("CheckpointState",
                                                      ['model_dict', 'optimizer_dict', 'scheduler_dict', 'offset'])
 
-def train(train_set,valid_set, hparams):
+def train(train_set,valid_set, hparams,epoch):
     train_losses=[]
     
 
@@ -50,7 +50,6 @@ def train(train_set,valid_set, hparams):
     ):
         train_set = sb.dataio.dataloader.make_dataloader(
             train_set, **hparams["train_dataloader_opts"])
-
 
     with tqdm(train_set, dynamic_ncols=True,) as t:
         for batch in t:
@@ -85,15 +84,18 @@ def train(train_set,valid_set, hparams):
             valid_set, **hparams["valid_dataloader_opts"])
 
     valid_losses=[]
-    with tqdm(valid_set, dynamic_ncols=True,) as t:
-                
+    with tqdm(valid_set, dynamic_ncols=True,) as t:   
         for step, batch in enumerate(t):
             loss = forward_only(batch)
             valid_losses.extend(loss['loss'])
                         # if step > 10:
                         #     break
                 
-    logger.info(f"validation loss: {sum(valid_losses).item()/len(valid_losses)}, Train Loss: {sum(train_losses)/len(train_losses)}")
+    logger.info(f"Epoch:{epoch}, validation loss: {sum(valid_losses).item()/len(valid_losses)}, Train Loss: {sum(train_losses)/len(train_losses)}")
+    # save loss stats
+    log_file = open(hparams['train_log'], "a")
+    log_file.write(f"Epoch:{epoch}, validation loss: {sum(valid_losses).item()/len(valid_losses)}, Train Loss: {sum(train_losses)/len(train_losses)}\n")
+    log_file.close()
     save()
                 
 
@@ -196,7 +198,7 @@ def forward_only( batch):
         '''
         src_input_ids, _ = batch['src_input_ids']
         t, weights = hparams['schedule_sampler'].sample(src_input_ids.shape[0], run_opts['device'])
-        losses = hparams['diffusion'].training_losses(hparams['model'], batch, t)
+        losses = hparams['diffusion'].training_losses(hparams['model'], batch, t,hparams['wavlm'])
     return losses
 def grad_clip():
     # print('doing gradient clipping')
@@ -381,4 +383,4 @@ if __name__ == "__main__":
     hparams['lg_loss_scale'] = INITIAL_LOG_LOSS_SCALE
     hparams['global_step'] = 0
     for i in  range(hparams['epoch_counter']):
-        train(train_data,valid_data,hparams)
+        train(train_data,valid_data,hparams,i)

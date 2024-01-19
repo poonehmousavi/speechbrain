@@ -43,7 +43,8 @@ class CrossAttention_Diffusion_LM(nn.Module):
             init_pretrained=True,
             logits_mode=1,
             token_emb_type='pretrain',
-            fix_encoder=False
+            fix_encoder=False,
+            encoder_dim=768
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -113,6 +114,12 @@ class CrossAttention_Diffusion_LM(nn.Module):
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
+        self.encoder_proj=nn.Sequential(
+            nn.Linear(encoder_dim, config.hidden_size),
+            nn.Tanh(),
+            nn.Linear(config.hidden_size, config.hidden_size)
+        )
+
         config.num_hidden_layers = 6
         # define cross attention transformer block(6 layer)
         self.transformer_blocks = nn.ModuleList(
@@ -171,7 +178,7 @@ class CrossAttention_Diffusion_LM(nn.Module):
         # encode embedding
         # print(emb_inputs.shape, attention_mask.shape)
         if audio_inputs is not None:
-            passage_hidden = audio_inputs
+            passage_hidden = self.encoder_proj(audio_inputs)
         else:
             if self.fix_encoder:
                 with torch.no_grad():

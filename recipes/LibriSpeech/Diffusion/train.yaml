@@ -55,6 +55,7 @@ model: !new:model.Diffusion_LM.CrossAttention_Diffusion_LM
   logits_mode: 1
   init_pretrained: False
   token_emb_type: random
+  encoder_dim: 768
 
 wavlm_hub: microsoft/wavlm-base
 freeze_wavlmc: True
