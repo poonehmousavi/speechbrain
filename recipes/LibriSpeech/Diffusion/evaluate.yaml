@@ -1,0 +1,97 @@
+# Seed needs to be set at top of yaml, before objects with parameters are made
+seed: 1986
+__set_seed: !apply:torch.manual_seed [!ref <seed>]
+output_folder: !ref results/auto-encoder/<seed>
+output_wer_folder: !ref <output_folder>/
+save_folder: !ref <output_folder>/save
+train_log: !ref <output_folder>/train_log.txt
+pretrain_model_path: !ref results/auto-encoder/1986/save/model_checkpoint-1338
+generate_path: !ref <output_folder>/samples/
+# Data files
+data_folder: data/LibriSpeech # e,g./path/to/LibriSpeech
+# noise/ris dataset will automatically be downloaded
+# data_folder_rirs: !ref <data_folder>
+train_splits: ["train-clean-100","train-clean-360","train-other-500"]
+dev_splits: ["dev-clean"]
+test_splits: ["test-clean"]
+skip_prep: False
+ckpt_interval_minutes: 25 # save checkpoint every N min
+train_csv: !ref <output_folder>/train.csv
+valid_csv: !ref <output_folder>/dev-clean.csv
+test_csv:
+   - !ref <output_folder>/test-clean.csv
+sorting: ascending
+precision: fp32 # bf16, fp16 or fp32
+sample_rate: 16000
+maxlength: 32
+# With data_parallel batch_size is split into N jobs
+# With DDP batch_size is multiplied by N jobs
+# Must be 3 per GPU to fit 32GB of VRAM
+batch_size: 128
+test_batch_size: 64
+gradient_accumulation_steps: 1
+epoch_counter: 20
+# Dataloader options
+train_dataloader_opts:
+   batch_size: !ref <batch_size>
+
+valid_dataloader_opts:
+   batch_size: !ref <batch_size>
+
+test_dataloader_opts:
+   batch_size: !ref <test_batch_size>
+
+
+in_channel: 128
+
+# Model Setting
+model: !new:model.Diffusion_LM.CrossAttention_Diffusion_LM
+  model_channels: 128 
+  dropout: 0.1
+  in_channels: !ref <in_channel>
+  out_channels: 128
+  vocab_size: 30522 
+  config_name: bert-base-uncased
+  logits_mode: 1
+  init_pretrained: False
+  token_emb_type: random
+  encoder_dim: 768
+
+# Diffusion Setting
+diff_args:
+  steps: 2000
+  learn_sigma: False
+  sigma_small: False
+  noise_schedule: sqrt
+  use_kl: False
+  predict_xstart: True
+  rescale_timesteps: True
+  rescale_learned_sigmas: True
+  model_arch: s2s_CAT
+  training_mode: s2s
+
+# how to sample t per batch, uniform is Uniform sampling, loss-second-moment is Sampling according to loss
+schedule_sampler: uniform
+
+# Optimizer Setting
+lr_anneal_steps: 120000 
+warmup_steps: 7200
+weight_decay: 0.0
+ema_rate: 0.9999
+lr: 5e-05
+gradient_clipping: -1
+eval_interval: 500
+
+num_samples: 1
+interval_step : 1
+
+
+wavlm_hub: microsoft/wavlm-base
+freeze_wavlmc: True
+wavlm_folder: !ref <output_folder>/wavlm_checkpoint
+
+wavlm: !new:speechbrain.lobes.models.huggingface_transformers.wavlm.WavLM
+   source: !ref <wavlm_hub>
+   output_norm: True
+   freeze: !ref <freeze_wavlmc>
+   save_path: !ref <wavlm_folder>
