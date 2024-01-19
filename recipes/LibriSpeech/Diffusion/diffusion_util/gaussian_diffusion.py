@@ -254,7 +254,7 @@ class GaussianDiffusion:
         if self.training_mode == 'e2e':
             return self.training_losses_e2e(model, input_text, t)
         elif self.training_mode == 's2s':
-            return self.training_losses_s2s(model, input_text, t)
+            return self.training_losses_s2s(model, input_text, t,passage_encoder)
         elif self.training_mode == 'e2e-simple':
             return self.training_losses_e2e_simple(model, input_text, t)
         else:
@@ -1681,6 +1681,8 @@ class GaussianDiffusion:
         for s2s
         '''
         tgt_input_ids, _ = input_text['tgt_input_ids']
+        wavs, wav_lens = input_text['sig']
+        audio_feats = passage_encoder(wavs, wav_lens).to(t.device)
         src_input_ids, _ = input_text['src_input_ids']
         src_attention_mask=  (src_input_ids != 0).long()
         q_input_ids = tgt_input_ids.long().to(t.device)
@@ -1705,62 +1707,11 @@ class GaussianDiffusion:
 
         terms = {}
 
-        if self.loss_type == LossType.E2E_KL:
-            terms["loss"] = self._vb_terms_bpd_e2e(
-                model=model,
-                x_start=x_start,
-                x_t=x_t,
-                t=t,
-                input_ids=input_ids,
-                get_logits=get_logits,
-                x_start_mean=x_start_mean, x_start_log_var=x_start_log_var,
-                clip_denoised=False,
-                model_kwargs=None,
-                noise=noise,
-            )["output"]
-            # if self.loss_type == LossType.RESCALED_KL:
-            terms["loss"] *= self.num_timesteps
 
 
-        elif self.loss_type == LossType.E2E_MSE or self.loss_type == LossType.E2E_RESCALED_MSE:
+        if self.loss_type == LossType.E2E_MSE or self.loss_type == LossType.E2E_RESCALED_MSE:
 
-            model_output = model(x_t, self._scale_timesteps(t), src_input_ids=p_input_ids, src_attention_mask=p_attention_mask)
-
-            if self.model_var_type in [
-                ModelVarType.LEARNED,
-                ModelVarType.LEARNED_RANGE,
-            ]:
-                if self.model_arch == 'conv-unet' or self.model_arch == '1d-unet':
-                    B, C = x_t.shape[:2]
-                else:
-                    B, C = x_t.size(0), x_t.size(-1)
-
-                if self.model_arch == 'conv-unet':
-                    assert model_output.shape == (B, C * 2, *x_t.shape[2:])
-                    model_output, model_var_values = th.split(model_output, C, dim=1)
-                    frozen_out = th.cat([model_output.detach(), model_var_values], dim=1)
-                    # print('conv-unet')
-                else:
-                    # print(model_output.shape, (B, x.size(1), C * 2), x.shape, 'gaussian diffusion.')
-                    assert model_output.shape == (B, x_t.size(1), C * 2)
-                    model_output, model_var_values = th.split(model_output, C, dim=-1)
-                    frozen_out = th.cat([model_output.detach(), model_var_values], dim=-1)
-
-                terms["vb"] = self._vb_terms_bpd_e2e(
-                    model=lambda *args, r=frozen_out: r,
-                    x_start=x_start,
-                    x_t=x_t,
-                    t=t,
-                    input_ids=input_ids,
-                    get_logits=get_logits,
-                    x_start_mean=x_start_mean, x_start_log_var=x_start_log_var,
-                    clip_denoised=False,
-                    noise=noise,
-                )["output"]
-                if self.loss_type == LossType.E2E_RESCALED_MSE:
-                    # Divide by 1000 for equivalence with initial implementation.
-                    # Without a factor of 1/1000, the VB term hurts the MSE term.
-                    terms["vb"] *= self.num_timesteps / 1000.0
+            model_output = model(x_t, self._scale_timesteps(t), src_input_ids=p_input_ids, src_attention_mask=p_attention_mask,audio_inputs=audio_feats)
 
             target = {
                 ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(

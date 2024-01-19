@@ -158,7 +158,7 @@ class CrossAttention_Diffusion_LM(nn.Module):
             raise NotImplementedError
 
     def forward(self, x, timesteps, src_input_ids, src_attention_mask, attention_mask=None,
-                answer_id=None, answer_mask=None, y=None, src_ids=None, src_mask=None):
+                answer_id=None, answer_mask=None, y=None, src_ids=None, src_mask=None, audio_inputs=None):
 
         # prepare embedding
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
@@ -170,30 +170,22 @@ class CrossAttention_Diffusion_LM(nn.Module):
         hidden_states = self.dropout(self.LayerNorm(emb_inputs))
         # encode embedding
         # print(emb_inputs.shape, attention_mask.shape)
-        if self.fix_encoder:
-            with torch.no_grad():
-                out = self.passage_encoder(input_ids=src_input_ids,
-                                                 attention_mask=src_attention_mask)
-                passage_hidden = out.last_hidden_state
+        if audio_inputs is not None:
+            passage_hidden = audio_inputs
         else:
-            out = self.passage_encoder(input_ids=src_input_ids,
-                                       attention_mask=src_attention_mask)
-            passage_hidden = out.last_hidden_state + 0 * out.pooler_output.unsqueeze(1)
+            if self.fix_encoder:
+                with torch.no_grad():
+                    out = self.passage_encoder(input_ids=src_input_ids,
+                                                    attention_mask=src_attention_mask)
+                    passage_hidden = out.last_hidden_state
+            else:
+                out = self.passage_encoder(input_ids=src_input_ids,
+                                        attention_mask=src_attention_mask)
+                passage_hidden = out.last_hidden_state + 0 * out.pooler_output.unsqueeze(1)
 
-        if answer_id is not None:
-            answer_hidden_states = hidden_states.clone()
-            answer_out = self.passage_encoder(input_ids=answer_id,
-                                              attention_mask=answer_mask)
-            answer_hidden = answer_out.last_hidden_state + 0 * answer_out.pooler_output.unsqueeze(1)
-            for block in self.transformer_blocks:
-                answer_hidden_states = block(answer_hidden_states, answer_hidden)
 
         for block in self.transformer_blocks:
             hidden_states = block(hidden_states, passage_hidden)
-
-        if answer_id is not None:
-            # print("model_qg_forward...")
-            hidden_states = hidden_states + answer_hidden_states
 
         h = self.output_down_proj(hidden_states)
         h = h.type(x.dtype)

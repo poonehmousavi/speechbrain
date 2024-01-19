@@ -176,12 +176,9 @@ def load_states_from_checkpoint(model_file: str) -> CheckpointState:
 
 def forward_backward(batch):
     src_input_ids, _ = batch['src_input_ids']
+
     t, weights = hparams['schedule_sampler'].sample(src_input_ids.shape[0], run_opts['device'])
-    losses = hparams['diffusion'].training_losses(hparams['model'], batch, t)
-    if isinstance(hparams['schedule_sampler'], LossAwareSampler):
-        hparams['schedule_sampler'].update_with_local_losses(
-                t, losses["loss"].detach()
-            )
+    losses = hparams['diffusion'].training_losses(hparams['model'], batch, t, hparams['wavlm'])
 
     loss = (losses["loss"] * weights).mean()
     if hparams['precision'] == 'fp16':

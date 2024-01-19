@@ -56,6 +56,17 @@ model: !new:model.Diffusion_LM.CrossAttention_Diffusion_LM
   init_pretrained: False
   token_emb_type: random
 
+wavlm_hub: microsoft/wavlm-base
+freeze_wavlmc: True
+wavlm_folder: !ref <output_folder>/wavlm_checkpoint
+
+wavlm: !new:speechbrain.lobes.models.huggingface_transformers.wavlm.WavLM
+   source: !ref <wavlm_hub>
+   output_norm: True
+   freeze: !ref <freeze_wavlmc>
+   save_path: !ref <wavlm_folder>
+
+
 # Diffusion Setting
 diff_args:
   steps: 2000
