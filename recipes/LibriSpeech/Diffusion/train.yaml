@@ -11,7 +11,7 @@ generate_path: !ref <output_folder>/samples/
 data_folder: data/LibriSpeech # e,g./path/to/LibriSpeech
 # noise/ris dataset will automatically be downloaded
 # data_folder_rirs: !ref <data_folder>
-train_splits: ["train-clean-100"]
+train_splits: ["train-clean-100","train-clean-300","train-other-500"]
 dev_splits: ["dev-clean"]
 test_splits: ["test-clean"]
 skip_prep: False
@@ -27,10 +27,10 @@ maxlength: 32
 # With data_parallel batch_size is split into N jobs
 # With DDP batch_size is multiplied by N jobs
 # Must be 3 per GPU to fit 32GB of VRAM
-batch_size: 64
+batch_size: 128
 test_batch_size: 64
 gradient_accumulation_steps: 1
-epoch_counter: 3
+epoch_counter: 10
 # Dataloader options
 train_dataloader_opts:
    batch_size: !ref <batch_size>
@@ -55,9 +55,9 @@ model: !new:model.Diffusion_LM.CrossAttention_Diffusion_LM
   logits_mode: 1
   init_pretrained: False
   token_emb_type: random
-  encoder_dim: 768
+  encoder_dim: 1024
 
-wavlm_hub: microsoft/wavlm-base
+wavlm_hub: microsoft/wavlm-large
 freeze_wavlmc: True
 wavlm_folder: !ref <output_folder>/wavlm_checkpoint
 

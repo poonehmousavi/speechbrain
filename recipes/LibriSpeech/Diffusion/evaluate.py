@@ -29,198 +29,12 @@ INITIAL_LOG_LOSS_SCALE = 20.0
 CheckpointState = collections.namedtuple("CheckpointState",
                                                      ['model_dict', 'optimizer_dict', 'scheduler_dict', 'offset'])
 
-def train(train_set,valid_set, hparams):
-    train_losses=[]
-    
-
-    logger.info("***** Running training *****")
-    logger.info("  Max steps = %d", hparams['lr_anneal_steps'])
-    logger.info("  Instantaneous batch size per GPU = %d",  hparams['batch_size'])
-    logger.info(
-            "  Total train batch size (w. parallel, distributed & accumulation) = %d",
-             hparams['batch_size']
-            * hparams['gradient_accumulation_steps']
-            ,
-        )
-    logger.info("  Gradient Accumulation steps = %d", hparams['gradient_accumulation_steps'])
-    hparams['model'].zero_grad()
-    hparams['model'].train()
-    
-
-
-    if not (
-        isinstance(train_set, DataLoader) or isinstance(train_set, LoopedLoader)
-    ):
-        train_set = sb.dataio.dataloader.make_dataloader(
-            train_set, **hparams["train_dataloader_opts"])
-
-
-    with tqdm(train_set, dynamic_ncols=True,) as t:
-        for batch in t:
-            loss = train_batch(batch)
-            train_losses.append(loss.item())
-            
-    
-            # if hparams['global_step'] % hparams['eval_interval'] == 0:
-            #     logger.info('eval on validation set...')
-            #     if not (
-            #         isinstance(valid_set, DataLoader) or isinstance(valid_set, LoopedLoader)
-            #     ):
-            #         valid_set = sb.dataio.dataloader.make_dataloader(
-            #             valid_set, **hparams["valid_dataloader_opts"])
-
-            #     valid_losses=[]
-            #     with tqdm(valid_set, dynamic_ncols=True,) as t:
-                
-            #         for step, batch in enumerate(t):
-            #             loss = forward_only(batch)
-            #             valid_losses.extend(loss['loss'])
-            #             # if step > 10:
-            #             #     break
-                
-            #     logger.info(f"validation loss: {sum(valid_losses).item()/len(valid_losses)}, Train Loss: {sum(train_losses)/len(train_losses)}")
-
-    logger.info('eval on validation set...')
-    if not (
-            isinstance(valid_set, DataLoader) or isinstance(valid_set, LoopedLoader)
-            ):
-        valid_set = sb.dataio.dataloader.make_dataloader(
-            valid_set, **hparams["valid_dataloader_opts"])
-
-    valid_losses=[]
-    with tqdm(valid_set, dynamic_ncols=True,) as t:
-                
-        for step, batch in enumerate(t):
-            loss = forward_only(batch)
-            valid_losses.extend(loss['loss'])
-                        # if step > 10:
-                        #     break
-                
-    logger.info(f"validation loss: {sum(valid_losses).item()/len(valid_losses)}, Train Loss: {sum(train_losses)/len(train_losses)}")
-    save()
-                
-
-def save():
-
-    def save_checkpoint(rate, ema_params):
-        model_to_save = get_model_obj(hparams['model'])
-        if not rate:
-            model_state_dict = model_to_save.state_dict()
-        else:
-            model_state_dict = model_to_save.state_dict()
-            for i, (name, _value) in enumerate(model_to_save.named_parameters()):
-                assert name in model_state_dict
-                model_state_dict[name] = ema_params[i]
-
-        opt_state_dict = hparams['optimizer'].state_dict()
-        sch_state_dict = hparams['scheduler'].state_dict()
-        offset = hparams['global_step']
-        state = CheckpointState(model_state_dict,
-                                    opt_state_dict,
-                                    sch_state_dict,
-                                    offset,
-                                    )
-        Path(hparams['save_folder']).mkdir(parents=True, exist_ok=True)
-        if not rate:
-            ckpt_path = os.path.join(hparams['save_folder'], 'model_checkpoint-' + str(offset))
-        else:
-            ckpt_path = os.path.join(hparams['save_folder'], 'ema_' + str(rate) + '_checkpoint-' + str(offset))
-
-        torch.save(state._asdict(), ckpt_path)
-        logger.info('Saved checkpoint at %s', ckpt_path)
-
-
-    save_checkpoint(0, None)
-    for rate, params in zip(hparams['ema_rate'], hparams['ema_params']):
-        save_checkpoint(rate, params)
-
-def train_batch(batch):
-    hparams['model'].train()
-    # forward loss
-    loss = forward_backward(batch)
-    if hparams['precision'] == 'fp16':
-         pass
-    else:
-        # gradient clip
-        if hparams['gradient_clipping'] > 0:
-            grad_clip()
-        hparams['optimizer'].step()
-        # lr scheduler
-        hparams['scheduler'].step()
-        hparams['model'].zero_grad()
-         # ema
-        for rate, params in zip(hparams['ema_rate'], hparams['ema_params']):
-            update_ema(params, hparams['master_params'], rate=rate)
-    hparams['global_step'] += 1
-    return loss
-
-def get_model_obj(model: nn.Module):
-    return model.module if hasattr(model, 'module') else model
-
-def update_ema(target_params, source_params, rate=0.99):
-    """
-    Update target parameters to be closer to those of source parameters using
-    an exponential moving average.
-
-    :param target_params: the target parameter sequence.
-    :param source_params: the source parameter sequence.
-    :param rate: the EMA rate (closer to 1 means slower).
-    """
-    for targ, src in zip(target_params, source_params):
-        # print("target_params:", targ.device)
-        # print("source_params:", src.device)
-        targ.detach().mul_(rate).add_(src, alpha=1 - rate)
 
 def load_states_from_checkpoint(model_file: str) -> CheckpointState:
     logger.info('Reading saved model from %s', model_file)
     state_dict = torch.load(model_file, map_location=lambda s, l: default_restore_location(s, 'cpu'))
     logger.info('model_state_dict keys %s', state_dict.keys())
     return CheckpointState(**state_dict)
-
-def forward_backward(batch):
-    src_input_ids, _ = batch['src_input_ids']
-    t, weights = hparams['schedule_sampler'].sample(src_input_ids.shape[0], run_opts['device'])
-    losses = hparams['diffusion'].training_losses(hparams['model'], batch, t)
-    if isinstance(hparams['schedule_sampler'], LossAwareSampler):
-        hparams['schedule_sampler'].update_with_local_losses(
-                t, losses["loss"].detach()
-            )
-
-    loss = (losses["loss"] * weights).mean()
-    if hparams['precision'] == 'fp16':
-        loss_scale = 2 ** hparams['lg_loss_scale']
-        (loss * loss_scale).backward()
-    else:
-        loss.backward()
-    return loss
-
-def forward_only( batch):
-    with torch.no_grad():
-        hparams['model'].zero_grad()
-        '''
-        for s2s
-        '''
-        src_input_ids, _ = batch['src_input_ids']
-        t, weights = hparams['schedule_sampler'].sample(src_input_ids.shape[0], run_opts['device'])
-        losses = hparams['diffusion'].training_losses(hparams['model'], batch, t)
-    return losses
-def grad_clip():
-    # print('doing gradient clipping')
-    max_grad_norm=hparams['gradient_clipping'] #3.0
-    if hasattr(hparams['optimizer'], "clip_grad_norm"):
-         # Some optimizers (like the sharded optimizer) have a specific way to do gradient clipping
-        hparams['optimizer'].clip_grad_norm(max_grad_norm)
-        # else:
-        #     assert False
-        # elif hasattr(self.model, "clip_grad_norm_"):
-        #     # Some models (like FullyShardedDDP) have a specific way to do gradient clipping
-        #     self.model.clip_grad_norm_(args.max_grad_norm)
-    else:
-            # Revert to normal clipping otherwise, handling Apex or full precision
-        torch.nn.utils.clip_grad_norm_(
-            hparams['model'].parameters(), #amp.master_params(self.opt) if self.use_apex else
-            max_grad_norm,
-        )
 
 
 '''
@@ -463,9 +277,11 @@ if __name__ == "__main__":
                 src_input_ids, _ = batch['src_input_ids']
                 input_shape = (src_input_ids.shape[0],hparams['maxlength'], hparams['in_channel'])
                 tgt_input_ids, _ = batch['tgt_input_ids']
+                wavs, wav_lens = batch['sig']
+                audio_feats = hparams['wavlm'](wavs, wav_lens).to(run_opts['device'])
                 # print(p_input_ids.shape)
                 src_attention_mask=  (src_input_ids != 0).long()
-                model_kwargs = {'src_input_ids' : src_input_ids.to(run_opts['device']), 'src_attention_mask': src_attention_mask.to(run_opts['device'])}
+                model_kwargs = {'src_input_ids' : src_input_ids.to(run_opts['device']), 'src_attention_mask': src_attention_mask.to(run_opts['device']),'audio_inputs':audio_feats}
 
                 sample = sample_fn(
                     model,
