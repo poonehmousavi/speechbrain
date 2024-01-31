@@ -18,10 +18,155 @@ from speechbrain.dataio.dataloader import LoopedLoader
 from speechbrain.utils.distributed import run_on_main, if_main_process
 from hyperpyyaml import load_hyperpyyaml
 from pathlib import Path
-from util.util import (
-    create_gaussian_diffusion,
-)
 from diffusion_util.resample import create_named_schedule_sampler, LossAwareSampler, UniformSampler
+from diffusion_util import gaussian_diffusion as gd
+from diffusion_util.gaussian_diffusion import GaussianDiffusion
+
+class ASR(sb.Brain):
+    def compute_forward(self, batch, stage):
+        
+        wavs, wav_lens = batch.sig
+        wavs, wav_lens = wavs.to(self.device), wav_lens.to(self.device)
+        tgt_input_ids, _ = batch.tgt_input_ids
+        tgt_input_ids = tgt_input_ids.to(self.device)
+        audio_feats = self.modules.enc(wavs, wav_lens)
+        t, weights = hparams['schedule_sampler'].sample(wavs.shape[0], self.device)
+        x_start_mean = self.modules.model.get_embeds(tgt_input_ids)
+        std = gd._extract_into_tensor(hparams['diffusion'].sqrt_one_minus_alphas_cumprod,
+                                   torch.tensor([0]).to(self.device),
+                                   x_start_mean.shape)
+        x_start = hparams['diffusion'].get_x_start(x_start_mean, std)
+
+        # Padding masks for source and targets (use padding_mas)
+        src_key_padding_mask = self.hparams.padding_mask(wavs,  pad_idx=0)
+        # tgt_key_padding_mask = self.hparams.padding_mask(tgt_input_ids,  pad_idx=0)
+        noise = None
+        if noise is None:
+            noise = torch.randn_like(x_start)
+        x_t = hparams['diffusion'].q_sample(x_start, t, noise=noise)  # reparametrization trick.
+        # get_logits = self.modules.model.get_logits
+        model_output = self.modules.model(x_t, hparams['diffusion']._scale_timesteps(t), src_input_ids=audio_feats, src_attention_mask=src_key_padding_mask,audio_inputs=audio_feats)
+        return model_output,x_start,x_t,x_start_mean,noise
+    
+    def compute_objectives(self, predictions, batch, stage):
+        predictions,x_start,x_t,x_start_mean,noise =predictions
+        tgt_input_ids, _ = batch.tgt_input_ids
+        tgt_input_ids = tgt_input_ids.to(self.device)
+        t, weights = hparams['schedule_sampler'].sample(tgt_input_ids.shape[0], self.device)
+        get_logits = self.modules.model.get_logits
+        terms = {}
+        target = {
+            gd.ModelMeanType.PREVIOUS_X: hparams['diffusion'].q_posterior_mean_variance(
+                x_start=x_start, x_t=x_t, t=t
+            )[0],
+            gd.ModelMeanType.START_X: x_start,
+            gd.ModelMeanType.EPSILON: noise,
+            }[hparams['diffusion'].model_mean_type]
+        terms["mse"] = gd.mean_flat((target - predictions) ** 2)
+        # print( terms["mse"])
+        model_out_x_start = hparams['diffusion'].x0_helper(predictions, x_t, t)['pred_xstart']
+        t0_mask = (t == 0)
+        t0_loss = gd.mean_flat((x_start_mean - model_out_x_start) ** 2)
+
+        terms["t0_loss"] = t0_loss
+        terms["mse_pre"] = terms["mse"]
+        terms["mse"] = torch.where(t0_mask, t0_loss, terms["mse"])
+
+        # tT_mask = (t == self.num_timesteps - 1)
+        out_mean, _, _ =  hparams['diffusion'].q_mean_variance(x_start, torch.LongTensor([hparams['diffusion'].num_timesteps - 1]).to(x_start.device))
+        tT_loss = gd.mean_flat(out_mean ** 2)
+        terms["tT_loss"] = tT_loss
+
+        decoder_nll =  hparams['diffusion'].token_discrete_loss(x_start, get_logits, tgt_input_ids)
+        terms["decoder_nll"] = decoder_nll
+
+        # assert (model.lm_head.weight == model.word_embedding.weight).all()
+
+        if "vb" in terms:
+            terms["loss"] = terms["mse"] + terms["vb"]
+        else:
+            # KEY
+            terms["loss"] = terms["mse"] + (decoder_nll + tT_loss)
+
+        loss = (terms["loss"] * weights).mean()
+        
+        return loss
+
+
+    def on_stage_end(self, stage, stage_loss, epoch):
+        """Gets called at the end of an epoch."""
+        # Compute/store important stats
+        stage_stats = {"loss": stage_loss}
+        if stage == sb.Stage.TRAIN:
+            self.train_stats = stage_stats
+        # else:
+        #     stage_stats["CER"] = self.cer_metric.summarize("error_rate")
+        #     stage_stats["WER"] = self.wer_metric.summarize("error_rate")
+
+        # Perform end-of-iteration things, like annealing, logging, etc.
+        if stage == sb.Stage.VALID:
+            old_lr_model, new_lr_model = self.hparams.lr_annealing_model(
+                stage_stats["loss"]
+            )
+            old_lr_enc, new_lr_enc = self.hparams.lr_annealing_enc(
+                stage_stats["loss"]
+            )
+            sb.nnet.schedulers.update_learning_rate(
+                self.model_optimizer, new_lr_model
+            )
+            sb.nnet.schedulers.update_learning_rate(
+                self.enc_optimizer, new_lr_enc
+            )
+            self.hparams.train_logger.log_stats(
+                stats_meta={
+                    "epoch": epoch,
+                    "lr_model": old_lr_model,
+                    "lr_enc": old_lr_enc,
+                },
+                train_stats=self.train_stats,
+                valid_stats=stage_stats,
+            )
+            # self.checkpointer.save_and_keep_only(
+            #     meta={"WER": stage_stats["WER"]}, min_keys=["WER"],
+            # )
+        # elif stage == sb.Stage.TEST:
+        #     self.hparams.train_logger.log_stats(
+        #         stats_meta={"Epoch loaded": self.hparams.epoch_counter.current},
+        #         test_stats=stage_stats,
+        #     )
+        #     if if_main_process():
+        #         with open(self.hparams.test_wer_file, "w") as w:
+        #             self.wer_metric.write_stats(w)
+
+    def init_optimizers(self):
+        "Initializes the encoder optimizer and model optimizer"
+
+        # HuggingFace pretrained model
+        self.enc_optimizer = self.hparams.enc_opt_class(
+                self.modules.enc.parameters()
+        )
+
+        self.model_optimizer = self.hparams.model_opt_class(
+            self.hparams.model.parameters()
+        )
+
+        # save the optimizers in a dictionary
+        # the key will be used in `freeze_optimizers()`
+        self.optimizers_dict = {
+            "model_optimizer": self.model_optimizer,
+        }
+        if not self.hparams.freeze_enc:
+            self.optimizers_dict["enc_optimizer"] = self.enc_optimizer
+
+        if self.checkpointer is not None:
+            self.checkpointer.add_recoverable(
+                "enc_opt_class", self.enc_optimizer
+            )
+            self.checkpointer.add_recoverable("modelopt", self.model_optimizer)
+        
+
+
+
 INITIAL_LOG_LOSS_SCALE = 20.0
 CheckpointState = collections.namedtuple("CheckpointState",
                                                      ['model_dict', 'optimizer_dict', 'scheduler_dict', 'offset'])
@@ -307,6 +452,31 @@ def dataio_prepare(hparams):
         valid_data,
         test_datasets,
     )
+'''
+create diffusion process
+'''
+def create_gaussian_diffusion(
+    steps=1000,
+    noise_schedule="cosine",
+    rescale_timesteps=False,
+):
+
+    # β , Determine according to the maximum T and variance schedule
+    logger.info("noise_schedule: ", noise_schedule)
+    logger.info("Diffusion Steps: ", steps)
+
+    betas = gd.get_named_beta_schedule(noise_schedule, steps)
+    logger.info("betas: ", betas)
+
+    return GaussianDiffusion(
+        betas=betas,
+        model_mean_type=gd.ModelMeanType.START_X,
+        model_var_type= gd.ModelVarType.FIXED_LARGE,
+        loss_type=gd.LossType.MSE,
+        rescale_timesteps=rescale_timesteps,
+
+
+    )
 
 logger = logging.getLogger(__name__)
 if __name__ == "__main__":
@@ -353,34 +523,62 @@ if __name__ == "__main__":
         hparams
     )
 
-    model = hparams['model']
+    # # We load the pretrained wav2vec2 model
+    if "pretrainer" in hparams.keys():
+        run_on_main(hparams["pretrainer"].collect_files)
+        hparams["pretrainer"].load_collected()
+
+    # Trainer initialization
+    asr_brain = ASR(
+        modules=hparams["modules"],
+        hparams=hparams,
+        run_opts=run_opts,
+        checkpointer=hparams["checkpointer"],
+    )
+
+
+
+
+
+    
     diffusion = create_gaussian_diffusion(**hparams["diff_args"])
     hparams['diffusion'] = diffusion
 
-    # Load pretrained model
-    if os.path.isfile(hparams['pretrain_model_path']):
-        print("load model ckpt at :", hparams['pretrain_model_path'])
-        saved_state = load_states_from_checkpoint(hparams['pretrain_model_path'])
-        model.load_state_dict(saved_state.model_dict, strict=False)
-    model.to(run_opts['device'])
-
     # time step schedule sampler
     hparams['schedule_sampler'] = create_named_schedule_sampler(hparams['schedule_sampler'], diffusion)
+
+    # # Load pretrained model
+    # if os.path.isfile(hparams['pretrain_model_path']):
+    # print("load model ckpt at :", hparams['pretrain_model_path'])
+    # saved_state = load_states_from_checkpoint(hparams['pretrain_model_path'])
+    # model.load_state_dict(torch.load("pre-trained/model.ckpt", map_location='cpu'), strict=False)
+    # torch.save(saved_state.model_dict,"results/diff_asr/1986/save/model.ckpt" )
+    # torch.save(saved_state.scheduler_dict,"results/diff_asr/1986/save/scheduler_model.ckpt")
+    # torch.save(saved_state.optimizer_dict,"results/diff_asr/1986/save/optimizer_model.ckpt")
+    # model.load_state_dict(torch.load("pre-trained/model.ckpt", map_location='cpu'), strict=False)
+    # model.to(run_opts['device'])
+
+    # Training
+    asr_brain.fit(
+        asr_brain.hparams.epoch_counter,
+        train_data,
+        valid_data,
+        train_loader_kwargs=hparams["train_dataloader_opts"],
+        valid_loader_kwargs=hparams["valid_dataloader_opts"],
+    )
+
+
+
     
-    hparams['master_params'] = list(hparams['model'].parameters())
-    hparams['optimizer'] = AdamW(hparams['master_params'], lr=hparams['lr'], weight_decay=hparams['weight_decay'])
-    hparams['scheduler'] = get_linear_schedule_with_warmup(
-           hparams['optimizer'], num_warmup_steps=hparams['warmup_steps'], num_training_steps=hparams['lr_anneal_steps']
-        )
-    hparams['ema_rate'] = (
-            [hparams['ema_rate']]
-            if isinstance(hparams['ema_rate'], float)
-            else [float(x) for x in hparams['ema_rate'].split(",")]
-        )
-    hparams['ema_params'] = [
-                copy.deepcopy(hparams['master_params']) for _ in range(len(hparams['ema_rate']))
-            ]
-    hparams['lg_loss_scale'] = INITIAL_LOG_LOSS_SCALE
-    hparams['global_step'] = 0
-    for i in  range(hparams['epoch_counter']):
-        train(train_data,valid_data,hparams,i)
+    # hparams['ema_rate'] = (
+    #         [hparams['ema_rate']]
+    #         if isinstance(hparams['ema_rate'], float)
+    #         else [float(x) for x in hparams['ema_rate'].split(",")]
+    #     )
+    # hparams['ema_params'] = [
+    #             copy.deepcopy(hparams['master_params']) for _ in range(len(hparams['ema_rate']))
+    #         ]
+    # hparams['lg_loss_scale'] = INITIAL_LOG_LOSS_SCALE
+    # hparams['global_step'] = 0
+    # for i in  range(hparams['epoch_counter']):
+    #     train(train_data,valid_data,hparams,i)

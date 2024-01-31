@@ -177,15 +177,13 @@ class GaussianDiffusion:
         model_var_type,
         loss_type,
         rescale_timesteps=False,
-        model_arch=None,
-        training_mode='e2e',
-        # model_arch='conv-unet',
+
     ):
         self.model_mean_type = model_mean_type
         self.model_var_type = model_var_type
         self.loss_type = loss_type
         self.rescale_timesteps = rescale_timesteps
-        self.model_arch=model_arch
+
 
         # Use float64 for accuracy.
         betas = np.array(betas, dtype=np.float64)
@@ -237,34 +235,17 @@ class GaussianDiffusion:
             * np.sqrt(alphas)
             / (1.0 - self.alphas_cumprod)
         )
-
-        self.training_mode = training_mode
-        print('training mode is ', training_mode)
         self.mapping_func = None 
-        #
-        # if training_mode == 'e2e':
-        #     self.training_losses = self.training_losses_e2e
-        # else:
-        #     self.training_losses = self.training_losses_emb
+
 
     '''
     training_losses
     '''
     def training_losses(self, model, input_text, t, passage_encoder=None):
-        if self.training_mode == 'e2e':
-            return self.training_losses_e2e(model, input_text, t)
-        elif self.training_mode == 's2s':
-            return self.training_losses_s2s(model, input_text, t,passage_encoder)
-        elif self.training_mode == 'e2e-simple':
-            return self.training_losses_e2e_simple(model, input_text, t)
-        else:
-            return self.training_losses_emb(model, input_text, t)
+        return self.training_losses_s2s(model, input_text, t,passage_encoder)
 
     def calc_bpd_loop(self, model, *args, **kwargs):
-        if self.training_mode == 'e2e':
-            return self.calc_bpd_loop_e2e(model, *args, **kwargs)
-        else:
-            return self.calc_bpd_loop_emb(model, *args, **kwargs)
+        return self.calc_bpd_loop_emb(model, *args, **kwargs)
 
     def q_mean_variance(self, x_start, t):
         """
@@ -352,10 +333,8 @@ class GaussianDiffusion:
         """
         if model_kwargs is None:
             model_kwargs = {}
-        if self.model_arch == 'conv-unet':
-            B, C = x.shape[:2]
-        else:
-            B, C = x.size(0), x.size(-1)
+
+        B, C = x.size(0), x.size(-1)
         assert t.shape == (B,)
 
         # DEBUG:
@@ -383,13 +362,8 @@ class GaussianDiffusion:
         x_start_cycle_pred = self._predict_xstart_from_eps(x_t=x, t=t, eps=direct_pred_eps)
 
         if self.model_var_type in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE]:
-            if self.model_arch == 'conv-unet':
-                assert model_output.shape == (B, C * 2, *x.shape[2:])
-                model_output, model_var_values = th.split(model_output, C, dim=1)
-                # print('conv-unet')
-            else:
-                assert model_output.shape == (B, x.size(1), C * 2)
-                model_output, model_var_values = th.split(model_output, C, dim=-1)
+            assert model_output.shape == (B, x.size(1), C * 2)
+            model_output, model_var_values = th.split(model_output, C, dim=-1)
 
             if self.model_var_type == ModelVarType.LEARNED:
                 model_log_variance = model_var_values
@@ -486,25 +460,14 @@ class GaussianDiffusion:
         """
         if model_kwargs is None:
             model_kwargs = {}
-        if self.model_arch == 'conv-unet' or self.model_arch == '1d-unet':
-            B, C = x.shape[:2]
-        else:
-            B, C = x.size(0), x.size(-1)
+        B, C = x.size(0), x.size(-1)
         assert t.shape == (B,)
         # print(x.shape)
         model_output = model(x, self._scale_timesteps(t), **model_kwargs)
 
         if self.model_var_type in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE]:
-            if self.model_arch == 'conv-unet':
-                assert model_output.shape == (B, C * 2, *x.shape[2:])
-                model_output, model_var_values = th.split(model_output, C, dim=1)
-                # print('conv-unet')
-            elif self.model_arch == '1d-unet':
-                assert model_output.shape == (B, C * 2, *x.shape[2:])
-                model_output, model_var_values = th.split(model_output, C, dim=1)
-            else:
-                assert model_output.shape == (B, x.size(1), C * 2)
-                model_output, model_var_values = th.split(model_output, C, dim=-1)
+            assert model_output.shape == (B, x.size(1), C * 2)
+            model_output, model_var_values = th.split(model_output, C, dim=-1)
 
             if self.model_var_type == ModelVarType.LEARNED:
                 model_log_variance = model_var_values
@@ -1387,29 +1350,11 @@ class GaussianDiffusion:
                 ModelVarType.LEARNED,
                 ModelVarType.LEARNED_RANGE,
             ]:
-                if self.model_arch == 'conv-unet':
-                    B, C = x_t.shape[:2]
-                elif self.model_arch == '1d-unet':
-                    B, C = x_t.size(0), x_t.size(1)
-                else:
-                    B, C = x_t.size(0), x_t.size(-1)
-                # B, C = x_t.shape[:2]
 
-                if self.model_arch == 'conv-unet':
-                    assert model_output.shape == (B, C * 2, *x_t.shape[2:])
-                    model_output, model_var_values = th.split(model_output, C, dim=1)
-                    frozen_out = th.cat([model_output.detach(), model_var_values], dim=1)
-                    # print('conv-unet')
-                elif self.model_arch == '1d-unet':
-                    # print(model_output.shape, (B, C * 2, *x_t.shape[2:]))
-                    assert model_output.shape == (B, C * 2, *x_t.shape[2:])
-                    model_output, model_var_values = th.split(model_output, C, dim=1)
-                    frozen_out = th.cat([model_output.detach(), model_var_values], dim=1)
-                else:
-                    # print(model_output.shape, (B, x.size(1), C * 2), x.shape, 'gaussian diffusion.')
-                    assert model_output.shape == (B, x_t.size(1), C * 2)
-                    model_output, model_var_values = th.split(model_output, C, dim=-1)
-                    frozen_out = th.cat([model_output.detach(), model_var_values], dim=-1)
+                B, C = x_t.size(0), x_t.size(-1)
+                assert model_output.shape == (B, x_t.size(1), C * 2)
+                model_output, model_var_values = th.split(model_output, C, dim=-1)
+                frozen_out = th.cat([model_output.detach(), model_var_values], dim=-1)
 
                 # assert model_output.shape == (B, C * 2, *x_t.shape[2:])
                 # model_output, model_var_values = th.split(model_output, C, dim=1)
@@ -1464,11 +1409,7 @@ class GaussianDiffusion:
 
     def token_discrete_loss(self, x_t, get_logits, input_ids):
         # print("input_ids: ", input_ids[0])
-        if self.model_arch == 'conv-unet' or  self.model_arch == '1d-unet':
-            reshaped_x_t = x_t.view(x_t.size(0), x_t.size(1), -1).permute(0, 2, 1)
-        else:
-            # print(x_t.shape)
-            reshaped_x_t = x_t
+        reshaped_x_t = x_t
         # print("x_start: ", x_t[0])
         logits = get_logits(reshaped_x_t)  # bsz, seqlen, vocab
         # print("logits: ", logits[0])
@@ -1517,15 +1458,6 @@ class GaussianDiffusion:
         # attention_mask = input_text['attention_mask_q']
         # attention_mask = get_extended_attention_mask(attention_mask)
         x_start_mean = model.module.get_embeds(input_ids)
-        # print("x_start_mean", x_start_mean[0])
-        # if self.model_arch == 'conv-unet':
-        #     seqlen = int(np.sqrt(input_ids.size(1)))
-        #     x_start_mean = x_start_mean.view(x_start_mean.size(0), seqlen, seqlen, x_start_mean.size(-1)).permute(0, 3,
-        #                                                                                                           1, 2)
-        # elif self.model_arch == '1d-unet':
-        #     x_start_mean = x_start_mean.permute(0, 2, 1)
-
-        # print("sqrt_one_minus_alphas_cumprod: ", self.sqrt_one_minus_alphas_cumprod)
         std = _extract_into_tensor(self.sqrt_one_minus_alphas_cumprod,
                                    th.tensor([0]).to(x_start_mean.device),
                                    x_start_mean.shape)
@@ -1577,21 +1509,11 @@ class GaussianDiffusion:
                 ModelVarType.LEARNED,
                 ModelVarType.LEARNED_RANGE,
             ]:
-                if self.model_arch == 'conv-unet' or self.model_arch == '1d-unet':
-                    B, C = x_t.shape[:2]
-                else:
-                    B, C = x_t.size(0), x_t.size(-1)
-
-                if self.model_arch == 'conv-unet':
-                    assert model_output.shape == (B, C * 2, *x_t.shape[2:])
-                    model_output, model_var_values = th.split(model_output, C, dim=1)
-                    frozen_out = th.cat([model_output.detach(), model_var_values], dim=1)
-                    # print('conv-unet')
-                else:
-                    # print(model_output.shape, (B, x.size(1), C * 2), x.shape, 'gaussian diffusion.')
-                    assert model_output.shape == (B, x_t.size(1), C * 2)
-                    model_output, model_var_values = th.split(model_output, C, dim=-1)
-                    frozen_out = th.cat([model_output.detach(), model_var_values], dim=-1)
+ 
+                B, C = x_t.size(0), x_t.size(-1)
+                assert model_output.shape == (B, x_t.size(1), C * 2)
+                model_output, model_var_values = th.split(model_output, C, dim=-1)
+                frozen_out = th.cat([model_output.detach(), model_var_values], dim=-1)
 
                 terms["vb"] = self._vb_terms_bpd_e2e(
                     model=lambda *args, r=frozen_out: r,
@@ -1776,12 +1698,6 @@ class GaussianDiffusion:
         x_start = None
         input_ids = model_kwargs.pop('input_ids').to(t.device)
         x_start_mean = model.model.module.get_embeds(input_ids)
-        if self.model_arch == 'conv-unet':
-            seqlen = int(np.sqrt(input_ids.size(1)))
-            x_start_mean = x_start_mean.view(x_start_mean.size(0), seqlen, seqlen, x_start_mean.size(-1)).permute(0, 3,
-                                                                                                                  1, 2)
-        elif self.model_arch == '1d-unet':
-            x_start_mean = x_start_mean.permute(0, 2, 1)
         x_start = x_start_mean
         # print(x_start_mean.shape, x_start.shape)
         if noise is None:
@@ -1818,21 +1734,9 @@ class GaussianDiffusion:
                 ModelVarType.LEARNED,
                 ModelVarType.LEARNED_RANGE,
             ]:
-                if self.model_arch == 'conv-unet' or self.model_arch == '1d-unet':
-                    B, C = x_t.shape[:2]
-                else:
-                    B, C = x_t.size(0), x_t.size(-1)
-
-                if self.model_arch == 'conv-unet':
-                    assert model_output.shape == (B, C * 2, *x_t.shape[2:])
-                    model_output, model_var_values = th.split(model_output, C, dim=1)
-                    frozen_out = th.cat([model_output.detach(), model_var_values], dim=1)
-                    # print('conv-unet')
-                else:
-                    # print(model_output.shape, (B, x.size(1), C * 2), x.shape, 'gaussian diffusion.')
-                    assert model_output.shape == (B, x_t.size(1), C * 2)
-                    model_output, model_var_values = th.split(model_output, C, dim=-1)
-                    frozen_out = th.cat([model_output.detach(), model_var_values], dim=-1)
+                assert model_output.shape == (B, x_t.size(1), C * 2)
+                model_output, model_var_values = th.split(model_output, C, dim=-1)
+                frozen_out = th.cat([model_output.detach(), model_var_values], dim=-1)
 
 
                 terms["vb"] = self._vb_terms_bpd_e2e(
@@ -1911,12 +1815,6 @@ class GaussianDiffusion:
 
         input_ids = model_kwargs.pop('input_ids').to(device)
         x_start_mean = model.get_embeds(input_ids)
-        if self.model_arch == 'conv-unet':
-            seqlen = int(np.sqrt(input_ids.size(1)))
-            x_start_mean = x_start_mean.view(x_start_mean.size(0), seqlen, seqlen, x_start_mean.size(-1)).permute(0, 3,
-                                                                                                                  1, 2)
-        elif self.model_arch == '1d-unet':
-            x_start_mean = x_start_mean.permute(0, 2, 1)
         std = _extract_into_tensor(self.sqrt_one_minus_alphas_cumprod,
                                    th.tensor([0]).to(x_start_mean.device),
                                    x_start_mean.shape)
