@@ -5,6 +5,7 @@ import torch
 from torch import nn
 from torch.serialization import default_restore_location
 import logging
+from functools import partial
 from tqdm.contrib import tqdm
 import collections
 from transformers import (
@@ -12,6 +13,7 @@ from transformers import (
     AutoTokenizer,
     AdamW,
 )
+import numpy as np
 import speechbrain as sb
 from torch.utils.data import DataLoader
 from speechbrain.dataio.dataloader import LoopedLoader
@@ -89,9 +91,116 @@ class ASR(sb.Brain):
             terms["loss"] = terms["mse"] + (decoder_nll + tT_loss)
 
         loss = (terms["loss"] * weights).mean()
+
+        if (stage == sb.Stage.TEST) or (stage == sb.Stage.VALID and hparams['epoch_counter'].current % hparams['valid_search_interval'] == 0):
+            self.generate(batch,stage)
         
         return loss
 
+    def generate(self,batch,stage):
+        sample_fn = (
+            hparams['diffusion'].p_sample_loop)
+        emb_model = self.modules.model.word_embedding
+        
+        each_sample_list = []
+        tgt_sample =[]
+        
+
+        ids = batch.id
+        wavs, wav_lens = batch.sig
+        wavs, wav_lens = wavs.to(self.device), wav_lens.to(self.device)
+        tgt_input_ids, _ = batch.tgt_input_ids
+        tgt_input_ids = tgt_input_ids.to(self.device)
+        audio_feats = self.modules.enc(wavs, wav_lens)
+        src_key_padding_mask = self.hparams.padding_mask(wavs,  pad_idx=0)
+        model_kwargs = {'src_input_ids' : audio_feats, 'src_attention_mask': src_key_padding_mask,'audio_inputs':audio_feats}
+        input_shape = (wavs.shape[0],hparams['maxlength'], hparams['in_channel'])
+        sample = sample_fn(
+                        self.modules.model,
+                        input_shape,
+                        clip_denoised=False,
+                        denoised_fn=partial(self.denoised_fn_round, emb_model),
+                        model_kwargs=model_kwargs,
+                        top_p=-1.0,
+                        interval_step=hparams['interval_step'],
+                    )
+        
+        logger.info(f"sample result shape: {sample.shape}", )
+        logger.info('decoding for e2e... ')
+        logits = self.modules.model.get_logits(sample)
+        cands = torch.topk(logits, k=1, dim=-1)
+        sample_id_list = cands.indices
+        predicted_words = tokenizer.batch_decode(
+            sample_id_list.squeeze(dim=-1),
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=True,
+            )
+        target_words = tokenizer.batch_decode(
+            tgt_input_ids,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=True,
+            )
+        
+
+        self.wer_metric.append(ids, predicted_words, target_words)
+        self.cer_metric.append(ids, predicted_words, target_words)
+
+    '''
+    rounding
+    '''
+    def denoised_fn_round(self,model, text_emb,t):
+
+        down_proj_emb = model.weight  # input_embs
+        # print(t)
+        old_shape = text_emb.shape
+        old_device = text_emb.device
+
+        def get_efficient_knn(down_proj_emb, text_emb, dist='l2'):
+            if dist == 'l2':
+                emb_norm = (down_proj_emb ** 2).sum(-1).view(-1, 1)  # vocab
+                text_emb_t = torch.transpose(text_emb.view(-1, text_emb.size(-1)), 0, 1)  # d, bsz*seqlen
+                arr_norm = (text_emb ** 2).sum(-1).view(-1, 1)  # bsz*seqlen, 1
+                # print(emb_norm.shape, arr_norm.shape)
+                dist = emb_norm + arr_norm.transpose(0, 1) - 2.0 * torch.mm(down_proj_emb,
+                                                                        text_emb_t)  # (vocab, d) x (d, bsz*seqlen)
+                dist = torch.clamp(dist, 0.0, np.inf)
+                # print(dist.shape)
+            topk_out = torch.topk(-dist, k=1, dim=0)
+            #     adjacency = down_proj_emb.unsqueeze(1).expand(-1, text_emb.size(0), -1) - text_emb.unsqueeze(0).expand(
+            #         down_proj_emb.size(0), -1, -1)
+            #     adjacency = -th.norm(adjacency, dim=-1)
+            # topk_out = th.topk(adjacency, k=1, dim=0)
+            # print(topk_out1.indices == topk_out.indices)
+            # assert th.all(topk_out1.indices == topk_out.indices)
+            return topk_out.values, topk_out.indices
+
+        def get_knn(down_proj_emb, text_emb, dist='l2'):
+            if dist == 'l2':
+                adjacency = down_proj_emb.unsqueeze(1).expand(-1, text_emb.size(0), -1) - text_emb.unsqueeze(0).expand(
+                    down_proj_emb.size(0), -1, -1)
+                adjacency = -torch.norm(adjacency, dim=-1)
+            topk_out = torch.topk(adjacency, k=1, dim=0)
+            return topk_out.values, topk_out.indices
+
+        dist = 'l2'
+        if len(text_emb.shape) > 2:
+            text_emb = text_emb.reshape(-1, text_emb.size(-1))
+        else:
+            text_emb = text_emb
+        # val, indices = get_knn(down_proj_emb,
+        #                        text_emb.to(down_proj_emb.device), dist=dist)
+        val, indices = get_efficient_knn(down_proj_emb,
+                                        text_emb.to(down_proj_emb.device), dist=dist)
+        rounded_tokens = indices[0]
+        # print(rounded_tokens.shape)
+        new_embeds = model(rounded_tokens).view(old_shape).to(old_device)
+        return new_embeds    
+    
+    def on_stage_start(self, stage, epoch):
+        """Gets called at the beginning of each epoch"""
+        if stage != sb.Stage.TRAIN:
+            self.cer_metric = self.hparams.cer_computer()
+            self.wer_metric = self.hparams.error_rate_computer()
 
     def on_stage_end(self, stage, stage_loss, epoch):
         """Gets called at the end of an epoch."""
@@ -99,9 +208,9 @@ class ASR(sb.Brain):
         stage_stats = {"loss": stage_loss}
         if stage == sb.Stage.TRAIN:
             self.train_stats = stage_stats
-        # else:
-        #     stage_stats["CER"] = self.cer_metric.summarize("error_rate")
-        #     stage_stats["WER"] = self.wer_metric.summarize("error_rate")
+        elif (stage == sb.Stage.TEST) or (stage == sb.Stage.VALID and hparams['epoch_counter'].current % hparams['valid_search_interval'] == 0):
+            stage_stats["CER"] = self.cer_metric.summarize("error_rate")
+            stage_stats["WER"] = self.wer_metric.summarize("error_rate")
 
         # Perform end-of-iteration things, like annealing, logging, etc.
         if stage == sb.Stage.VALID:
@@ -126,17 +235,18 @@ class ASR(sb.Brain):
                 train_stats=self.train_stats,
                 valid_stats=stage_stats,
             )
-            # self.checkpointer.save_and_keep_only(
-            #     meta={"WER": stage_stats["WER"]}, min_keys=["WER"],
-            # )
-        # elif stage == sb.Stage.TEST:
-        #     self.hparams.train_logger.log_stats(
-        #         stats_meta={"Epoch loaded": self.hparams.epoch_counter.current},
-        #         test_stats=stage_stats,
-        #     )
-        #     if if_main_process():
-        #         with open(self.hparams.test_wer_file, "w") as w:
-        #             self.wer_metric.write_stats(w)
+            if hparams['epoch_counter'].current % hparams['valid_search_interval'] == 0:
+                self.checkpointer.save_and_keep_only(
+                    meta={"WER": stage_stats["WER"]}, min_keys=["WER"],
+                )
+        elif stage == sb.Stage.TEST:
+            self.hparams.train_logger.log_stats(
+                stats_meta={"Epoch loaded": self.hparams.epoch_counter.current},
+                test_stats=stage_stats,
+            )
+            if if_main_process():
+                with open(self.hparams.test_wer_file, "w") as w:
+                    self.wer_metric.write_stats(w)
 
     def init_optimizers(self):
         "Initializes the encoder optimizer and model optimizer"
@@ -462,11 +572,11 @@ def create_gaussian_diffusion(
 ):
 
     # β , Determine according to the maximum T and variance schedule
-    logger.info("noise_schedule: ", noise_schedule)
-    logger.info("Diffusion Steps: ", steps)
+    logger.info(f"noise_schedule: {noise_schedule}")
+    logger.info(f"Diffusion Steps: {steps}" )
 
     betas = gd.get_named_beta_schedule(noise_schedule, steps)
-    logger.info("betas: ", betas)
+    logger.info(f"betas: {betas}")
 
     return GaussianDiffusion(
         betas=betas,
@@ -566,6 +676,21 @@ if __name__ == "__main__":
         train_loader_kwargs=hparams["train_dataloader_opts"],
         valid_loader_kwargs=hparams["valid_dataloader_opts"],
     )
+
+    # Testing
+    if not os.path.exists(hparams["output_wer_folder"]):
+        os.makedirs(hparams["output_wer_folder"])
+
+    for k in test_datasets.keys():  # keys are test_clean, test_other etc
+        asr_brain.hparams.test_wer_file = os.path.join(
+            hparams["output_wer_folder"], f"wer_{k}.txt"
+        )
+        asr_brain.evaluate(
+            test_datasets[k],
+            min_key="WER",
+            test_loader_kwargs=hparams["test_dataloader_opts"],
+        )
+
 
 
 

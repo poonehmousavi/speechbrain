@@ -13,15 +13,17 @@ generate_path: !ref <output_folder>/samples/
 data_folder: data/LibriSpeech # e,g./path/to/LibriSpeech
 # noise/ris dataset will automatically be downloaded
 # data_folder_rirs: !ref <data_folder>
-train_splits: ["train-clean-100"]
+train_splits: ["train-clean-100","train-clean-360","train-other-500"]
 dev_splits: ["dev-clean"]
 test_splits: ["test-clean"]
 skip_prep: False
 ckpt_interval_minutes: 25 # save checkpoint every N min
+
 train_csv: !ref <output_folder>/train.csv
 valid_csv: !ref <output_folder>/dev-clean.csv
 test_csv:
    - !ref <output_folder>/test-clean.csv
+
 sorting: ascending
 precision: fp32 # bf16, fp16 or fp32
 sample_rate: 16000
@@ -32,7 +34,7 @@ maxlength: 32
 batch_size: 8
 test_batch_size: 8
 gradient_accumulation_steps: 1
-number_of_epochs: 10
+number_of_epochs: 20
 # Dataloader options
 train_dataloader_opts:
    batch_size: !ref <batch_size>
@@ -61,9 +63,9 @@ model: !new:model.Diffusion_LM.CrossAttention_Diffusion_LM
   logits_mode: 1
   init_pretrained: False
   token_emb_type: random
-  encoder_dim: 1024
+  encoder_dim: 768
 
-wavlm_hub: microsoft/wavlm-large
+wavlm_hub: microsoft/wavlm-base-plus
 freeze_enc: True
 wavlm_folder: !ref <output_folder>/wavlm_checkpoint
 
@@ -148,3 +150,6 @@ cer_computer: !name:speechbrain.utils.metric_stats.ErrorRateStats
 
 train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger
     save_file: !ref <train_log>
+
+
+valid_search_interval: 5
