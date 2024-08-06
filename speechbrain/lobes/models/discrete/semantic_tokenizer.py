@@ -254,7 +254,7 @@ class VectorQuantization(nn.Module):
         return self._codebook.embed
 
     def encode(self, x):
-        x = rearrange(x, "b d n -> b n d")
+        # x = rearrange(x, "b d n -> b n d")
         x = self.project_in(x)
         embed_in = self._codebook.encode(x)
         return embed_in
@@ -262,7 +262,7 @@ class VectorQuantization(nn.Module):
     def decode(self, embed_ind):
         quantize = self._codebook.decode(embed_ind)
         quantize = self.project_out(quantize)
-        quantize = rearrange(quantize, "b n d -> b d n")
+        # quantize = rearrange(quantize, "b n d -> b d n")
         return quantize
 
     def forward(self, x):
@@ -361,6 +361,25 @@ class ResidualVectorQuantizer(nn.Module):
         threshold_ema_dead_code (int): Threshold for dead code expiration. Replace any codes
             that have an exponential moving average cluster size less than the specified threshold with
             randomly selected vector from the current batch.
+    Example
+    -------
+    >>> import torch
+    >>> from speechbrain.lobes.models.huggingface_transformers.hubert import (HuBERT)
+    >>> inputs = torch.rand([3, 2000])
+    >>> model_hub = "facebook/hubert-large-ll60k"
+    >>> save_path = "savedir"
+    >>> sl_model = HuBERT(model_hub, save_path,output_all_hiddens=True)
+    >>> model = ResidualVectorQuantizer(dimension=1024,n_q=25)
+    >>> feats = ssl_model(inputs)
+    >>> output = model(feats, 16000)
+    >>> print(output.codes.shape)
+    torch.Size([25, 3, 6])
+    >>> codes=model.encode(feats, 16000)
+    >>> print(codes.shape)
+    torch.Size([25, 3, 6])
+    >>> recon_feat=model.decode(codes)
+    >>> print(recon_feat.shape)
+    torch.Size([3, 6, 1024])
     """
     def __init__(
         self,
@@ -439,16 +458,3 @@ class ResidualVectorQuantizer(nn.Module):
         quantized = self.vq.decode(codes)
         return quantized
 
-
-import torch
-from speechbrain.lobes.models.huggingface_transformers.hubert import (HuBERT)
-inputs = torch.rand([3, 2000])
-model_hub = "facebook/hubert-large-ll60k"
-save_path = "savedir"
-ssl_model = HuBERT(model_hub, save_path,output_all_hiddens=True)
-model = ResidualVectorQuantizer(dimension=1024,n_q=25)
-feats = ssl_model(inputs)
-output = model(feats, 16000)
-print(output.codes.shape)
-# tokens, embs ,pr_tokens= model(inputs,SSL_layers=ssl_layer_num, deduplicates=deduplicate, bpe_tokenizers=bpe_tokenizers)
-# print(tokens.shape)
