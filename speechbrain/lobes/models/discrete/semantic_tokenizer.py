@@ -1,4 +1,9 @@
-"""Core vector quantization implementation."""
+"""This lobe enables the integration of pretrained discrete SSL (hubert,wavlm,wav2vec) with RVQ for training semantic Tokenizer.
+   The code is adopted from official encodec github repo: https://github.com/facebookresearch/encodec
+
+Author
+ * Pooneh Mousavi 2024
+"""
 
 import typing as tp
 import warnings
@@ -254,7 +259,6 @@ class VectorQuantization(nn.Module):
         return self._codebook.embed
 
     def encode(self, x):
-        # x = rearrange(x, "b d n -> b n d")
         x = self.project_in(x)
         embed_in = self._codebook.encode(x)
         return embed_in
@@ -262,12 +266,11 @@ class VectorQuantization(nn.Module):
     def decode(self, embed_ind):
         quantize = self._codebook.decode(embed_ind)
         quantize = self.project_out(quantize)
-        # quantize = rearrange(quantize, "b n d -> b d n")
+
         return quantize
 
     def forward(self, x):
         device = x.device
-        # x = rearrange(x, "b d n -> b n d")
         x = self.project_in(x)
 
         quantize, embed_ind = self._codebook(x)
@@ -278,15 +281,11 @@ class VectorQuantization(nn.Module):
         loss = torch.tensor([0.0], device=device, requires_grad=self.training)
 
         if self.training:
-            warnings.warn('When using RVQ in training model, first check '
-                          'https://github.com/facebookresearch/encodec/issues/25 . '
-                          'The bug wasn\'t fixed here for reproducibility.')
             if self.commitment_weight > 0:
                 commit_loss = F.mse_loss(quantize.detach(), x)
                 loss = loss + commit_loss * self.commitment_weight
 
         quantize = self.project_out(quantize)
-        # quantize = rearrange(quantize, "b n d -> b d n")
         return quantize, embed_ind, loss
 
 
@@ -303,6 +302,7 @@ class ResidualVectorQuantization(nn.Module):
     def forward(self, x, n_q: tp.Optional[int] = None):
         quantized_out = 0.0
         residual = x[0]
+        quantized = torch.zeros(residual.shape)
 
         all_losses = []
         all_indices = []
@@ -310,8 +310,8 @@ class ResidualVectorQuantization(nn.Module):
         n_q = n_q or len(self.layers)
 
         for i,layer in enumerate(self.layers[:n_q]):
+            residual = x[i] - quantized.detach()
             quantized, indices, loss = layer(residual)
-            residual = x[i] - quantized
             quantized_out = quantized_out + quantized
 
             all_indices.append(indices)
@@ -322,12 +322,13 @@ class ResidualVectorQuantization(nn.Module):
 
     def encode(self, x: torch.Tensor, n_q: tp.Optional[int] = None) -> torch.Tensor:
         residual = x[0]
+        quantized = torch.zeros(residual.shape)
         all_indices = []
         n_q = n_q or len(self.layers)
         for i,layer in enumerate(self.layers[:n_q]):
+            residual = x[i] - quantized.detach()
             indices = layer.encode(residual)
             quantized = layer.decode(indices)
-            residual = x[i] - quantized
             all_indices.append(indices)
         out_indices = torch.stack(all_indices)
         return out_indices
@@ -368,10 +369,11 @@ class ResidualVectorQuantizer(nn.Module):
     >>> inputs = torch.rand([3, 2000])
     >>> model_hub = "facebook/hubert-large-ll60k"
     >>> save_path = "savedir"
-    >>> sl_model = HuBERT(model_hub, save_path,output_all_hiddens=True)
+    >>> sample_rate= 16000
+    >>> ssl_model = HuBERT(model_hub, save_path,output_all_hiddens=True)
     >>> model = ResidualVectorQuantizer(dimension=1024,n_q=25)
     >>> feats = ssl_model(inputs)
-    >>> output = model(feats, 16000)
+    >>> output = model(feats, sample_rate)
     >>> print(output.codes.shape)
     torch.Size([25, 3, 6])
     >>> codes=model.encode(feats, 16000)
@@ -409,7 +411,7 @@ class ResidualVectorQuantizer(nn.Module):
             threshold_ema_dead_code=self.threshold_ema_dead_code,
         )
 
-    def forward(self, x: torch.Tensor, frame_rate: int, bandwidth: tp.Optional[float] = None) -> QuantizedResult:
+    def forward(self, x: torch.Tensor, frame_rate: int, n_q: tp.Optional[int]= None) -> QuantizedResult:
         """Residual vector quantization on the given input tensor.
         Args:
             x (torch.Tensor): Input tensor.
@@ -421,21 +423,21 @@ class ResidualVectorQuantizer(nn.Module):
                 the associated bandwidth and any penalty term for the loss.
         """
         bw_per_q = self.get_bandwidth_per_quantizer(frame_rate)
-        n_q = self.get_num_quantizers_for_bandwidth(frame_rate, bandwidth)
+        n_q = n_q or self.n_q
         quantized, codes, commit_loss = self.vq(x, n_q=n_q)
         bw = torch.tensor(n_q * bw_per_q).to(x)
         return QuantizedResult(quantized, codes, bw, penalty=torch.mean(commit_loss))
 
-    def get_num_quantizers_for_bandwidth(self, frame_rate: int, bandwidth: tp.Optional[float] = None) -> int:
-        """Return n_q based on specified target bandwidth.
-        """
-        bw_per_q = self.get_bandwidth_per_quantizer(frame_rate)
-        n_q = self.n_q
-        if bandwidth and bandwidth > 0.:
-            # bandwidth is represented as a thousandth of what it is, e.g. 6kbps bandwidth is represented as
-            # bandwidth == 6.0
-            n_q = int(max(1, math.floor(bandwidth * 1000 / bw_per_q)))
-        return n_q
+    # def get_num_quantizers_for_bandwidth(self, frame_rate: int, bandwidth: tp.Optional[float] = None) -> int:
+    #     """Return n_q based on specified target bandwidth.
+    #     """
+    #     bw_per_q = self.get_bandwidth_per_quantizer(frame_rate)
+    #     n_q = self.n_q
+    #     if bandwidth and bandwidth > 0.:
+    #         # bandwidth is represented as a thousandth of what it is, e.g. 6kbps bandwidth is represented as
+    #         # bandwidth == 6.0
+    #         n_q = int(max(1, math.floor(bandwidth * 1000 / bw_per_q)))
+    #     return n_q
 
     def get_bandwidth_per_quantizer(self, frame_rate: int):
         """Return bandwidth per quantizer for a given input frame rate.
@@ -443,12 +445,12 @@ class ResidualVectorQuantizer(nn.Module):
         """
         return math.log2(self.bins) * frame_rate
 
-    def encode(self, x: torch.Tensor, frame_rate: int, bandwidth: tp.Optional[float] = None) -> torch.Tensor:
+    def encode(self, x: torch.Tensor, n_q: tp.Optional[int]= None) -> torch.Tensor:
         """Encode a given input tensor with the specified frame rate at the given bandwidth.
         The RVQ encode method sets the appropriate number of quantizers to use
         and returns indices for each quantizer.
         """
-        n_q = self.get_num_quantizers_for_bandwidth(frame_rate, bandwidth)
+        n_q = n_q or self.n_q
         codes = self.vq.encode(x, n_q=n_q)
         return codes
 
@@ -457,4 +459,3 @@ class ResidualVectorQuantizer(nn.Module):
         """
         quantized = self.vq.decode(codes)
         return quantized
-
