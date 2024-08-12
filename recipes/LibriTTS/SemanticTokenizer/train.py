@@ -45,44 +45,49 @@ class SemTokenBrain(sb.Brain):
         wavs, wav_lens = wavs.to(self.device), wav_lens.to(self.device)
 
         # Get the features from SSL model, BS, T
-        feats = self.hparams.ssl_model(wavs,wav_lens)
+        feats = self.hparams.ssl_model(wavs, wav_lens)
         output = self.hparams.codec(feats, self.hparams.sample_rate)
-        codes=output.codes.permute(1,2,0)
+        codes = output.codes.permute(1, 2, 0)
         codes += torch.arange(
-                0,
-                self.hparams.n_q * self.hparams.num_codebooks,
-                self.hparams.num_codebooks,
-                device=self.device,
-            )
+            0,
+            self.hparams.n_q * self.hparams.num_codebooks,
+            self.hparams.num_codebooks,
+            device=self.device,
+        )
         if self.hparams.layer_drop:
             num_layers_to_drop = np.random.randint(0, codes.shape[-1])
             if num_layers_to_drop > 0:
                 layers_to_drop = np.random.choice(
                     codes.shape[-1], size=num_layers_to_drop, replace=False
                 )
-                codes[:,:, layers_to_drop] = 0
+                codes[:, :, layers_to_drop] = 0
 
         # Trim end of audio
-        code_length = min(wavs.shape[1] // self.hparams.code_hop_size, codes.shape[1])
-        codes = codes[:,:code_length,:]
-        wavs = wavs[:,: code_length * self.hparams.code_hop_size]
+        code_length = min(
+            wavs.shape[1] // self.hparams.code_hop_size, codes.shape[1]
+        )
+        codes = codes[:, :code_length, :]
+        wavs = wavs[:, : code_length * self.hparams.code_hop_size]
 
         while wavs.shape[1] < self.hparams.segment_size:
             wavs = torch.hstack([wavs, wavs])
             codes = torch.hstack([codes, codes])
 
-
         if self.hparams.segment:
             codes = codes.swapdims(1, 2)
-            wavs, codes = sample_interval([wavs, codes], self.hparams.segment_size)
+            wavs, codes = sample_interval(
+                [wavs, codes], self.hparams.segment_size
+            )
             codes = codes.swapdims(1, 2)
         # generate sythesized waveforms
         y_g_hat, (log_dur_pred, log_dur) = self.modules.generator(codes)
-        y_g_hat = y_g_hat[:, :, :wavs.size(1)]
+        y_g_hat = y_g_hat[:, :, : wavs.size(1)]
 
         # get scores and features from discriminator for real and synthesized waveforms
         scores_fake, feats_fake = self.modules.discriminator(y_g_hat.detach())
-        scores_real, feats_real = self.modules.discriminator(wavs.unsqueeze(1).detach())
+        scores_real, feats_real = self.modules.discriminator(
+            wavs.unsqueeze(1).detach()
+        )
 
         return (
             wavs.unsqueeze(1),
@@ -115,7 +120,8 @@ class SemTokenBrain(sb.Brain):
         # wavs, wav_lens = batch.sig
         # wavs, wav_lens = wavs.to(self.device), wav_lens.to(self.device)
 
-        (   wavs,
+        (
+            wavs,
             codecs,
             y_hat,
             scores_fake,
@@ -125,7 +131,7 @@ class SemTokenBrain(sb.Brain):
             log_dur_pred,
             log_dur,
         ) = predictions
-        
+
         # Hold on to the batch for the inference sample. This is needed because
         # the infernece sample is run from on_stage_end only, where
         # batch information is not available
@@ -502,7 +508,6 @@ def dataio_prepare(hparams):
     return datasets
 
 
-
 if __name__ == "__main__":
     # Load hyperparameters file with command-line overrides
     hparams_file, run_opts, overrides = sb.parse_arguments(sys.argv[1:])
@@ -545,7 +550,6 @@ if __name__ == "__main__":
     # here we create the datasets objects as well as tokenization and encoding
     datasets = dataio_prepare(hparams)
 
-    
     # Brain class initialization
     hifi_gan_brain = SemTokenBrain(
         modules=hparams["modules"],
@@ -559,7 +563,6 @@ if __name__ == "__main__":
         run_opts=run_opts,
         checkpointer=hparams["checkpointer"],
     )
-
 
     # Training
     hifi_gan_brain.fit(

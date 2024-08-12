@@ -209,7 +209,7 @@ def create_json(wav_list, json_file, sample_rate, model_name=None):
 
         # Gets the path for the text files and extracts the input text
         normalized_text_path = os.path.join(
-             *path_parts[:-1], uttid + ".normalized.txt"
+            *path_parts[:-1], uttid + ".normalized.txt"
         )
         try:
             with open(normalized_text_path) as f:

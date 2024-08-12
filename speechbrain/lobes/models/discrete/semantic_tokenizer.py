@@ -5,20 +5,15 @@ Author
  * Pooneh Mousavi 2024
 """
 
-import typing as tp
-import warnings
-
-from einops import rearrange, repeat
-import torch
-from torch import nn
-import torch.nn.functional as F
-
-
-
-from dataclasses import dataclass, field
 import math
 import typing as tp
+import warnings
+from dataclasses import dataclass, field
 
+import torch
+import torch.nn.functional as F
+from einops import rearrange, repeat
+from torch import nn
 
 
 def default(val: tp.Any, d: tp.Any) -> tp.Any:
@@ -59,7 +54,7 @@ def kmeans(samples, num_clusters: int, num_iters: int = 10):
         diffs = rearrange(samples, "n d -> n () d") - rearrange(
             means, "c d -> () c d"
         )
-        dists = -(diffs ** 2).sum(dim=-1)
+        dists = -(diffs**2).sum(dim=-1)
 
         buckets = dists.max(dim=-1).indices
         bins = torch.bincount(buckets, minlength=num_clusters)
@@ -90,6 +85,7 @@ class EuclideanCodebook(nn.Module):
             that have an exponential moving average cluster size less than the specified threshold with
             randomly selected vector from the current batch.
     """
+
     def __init__(
         self,
         dim: int,
@@ -102,7 +98,9 @@ class EuclideanCodebook(nn.Module):
     ):
         super().__init__()
         self.decay = decay
-        init_fn: tp.Union[tp.Callable[..., torch.Tensor], tp.Any] = uniform_init if not kmeans_init else torch.zeros
+        init_fn: tp.Union[tp.Callable[..., torch.Tensor], tp.Any] = (
+            uniform_init if not kmeans_init else torch.zeros
+        )
         embed = init_fn(codebook_size, dim)
 
         self.codebook_size = codebook_size
@@ -121,7 +119,9 @@ class EuclideanCodebook(nn.Module):
         if self.inited:
             return
 
-        embed, cluster_size = kmeans(data, self.codebook_size, self.kmeans_iters)
+        embed, cluster_size = kmeans(
+            data, self.codebook_size, self.kmeans_iters
+        )
         self.embed.data.copy_(embed)
         self.embed_avg.data.copy_(embed.clone())
         self.cluster_size.data.copy_(cluster_size)
@@ -131,7 +131,9 @@ class EuclideanCodebook(nn.Module):
 
     def replace_(self, samples, mask):
         modified_codebook = torch.where(
-            mask[..., None], sample_vectors(samples, self.codebook_size), self.embed
+            mask[..., None],
+            sample_vectors(samples, self.codebook_size),
+            self.embed,
         )
         self.embed.data.copy_(modified_codebook)
 
@@ -201,7 +203,9 @@ class EuclideanCodebook(nn.Module):
             embed_sum = x.t() @ embed_onehot
             ema_inplace(self.embed_avg, embed_sum.t(), self.decay)
             cluster_size = (
-                laplace_smoothing(self.cluster_size, self.codebook_size, self.epsilon)
+                laplace_smoothing(
+                    self.cluster_size, self.codebook_size, self.epsilon
+                )
                 * self.cluster_size.sum()
             )
             embed_normalized = self.embed_avg / cluster_size.unsqueeze(1)
@@ -226,6 +230,7 @@ class VectorQuantization(nn.Module):
             randomly selected vector from the current batch.
         commitment_weight (float): Weight for commitment loss.
     """
+
     def __init__(
         self,
         dim: int,
@@ -236,22 +241,35 @@ class VectorQuantization(nn.Module):
         kmeans_init: bool = True,
         kmeans_iters: int = 50,
         threshold_ema_dead_code: int = 2,
-        commitment_weight: float = 1.,
+        commitment_weight: float = 1.0,
     ):
         super().__init__()
         _codebook_dim: int = default(codebook_dim, dim)
 
         requires_projection = _codebook_dim != dim
-        self.project_in = (nn.Linear(dim, _codebook_dim) if requires_projection else nn.Identity())
-        self.project_out = (nn.Linear(_codebook_dim, dim) if requires_projection else nn.Identity())
+        self.project_in = (
+            nn.Linear(dim, _codebook_dim)
+            if requires_projection
+            else nn.Identity()
+        )
+        self.project_out = (
+            nn.Linear(_codebook_dim, dim)
+            if requires_projection
+            else nn.Identity()
+        )
 
         self.epsilon = epsilon
         self.commitment_weight = commitment_weight
 
-        self._codebook = EuclideanCodebook(dim=_codebook_dim, codebook_size=codebook_size,
-                                           kmeans_init=kmeans_init, kmeans_iters=kmeans_iters,
-                                           decay=decay, epsilon=epsilon,
-                                           threshold_ema_dead_code=threshold_ema_dead_code)
+        self._codebook = EuclideanCodebook(
+            dim=_codebook_dim,
+            codebook_size=codebook_size,
+            kmeans_init=kmeans_init,
+            kmeans_iters=kmeans_iters,
+            decay=decay,
+            epsilon=epsilon,
+            threshold_ema_dead_code=threshold_ema_dead_code,
+        )
         self.codebook_size = codebook_size
 
     @property
@@ -293,6 +311,7 @@ class ResidualVectorQuantization(nn.Module):
     """Residual vector quantization implementation.
     Follows Algorithm 1. in https://arxiv.org/pdf/2107.03312.pdf
     """
+
     def __init__(self, *, num_quantizers, **kwargs):
         super().__init__()
         self.layers = nn.ModuleList(
@@ -309,7 +328,7 @@ class ResidualVectorQuantization(nn.Module):
 
         n_q = n_q or len(self.layers)
 
-        for i,layer in enumerate(self.layers[:n_q]):
+        for i, layer in enumerate(self.layers[:n_q]):
             residual = x[i] - quantized.detach()
             quantized, indices, loss = layer(residual)
             quantized_out = quantized_out + quantized
@@ -320,12 +339,14 @@ class ResidualVectorQuantization(nn.Module):
         out_losses, out_indices = map(torch.stack, (all_losses, all_indices))
         return quantized_out, out_indices, out_losses
 
-    def encode(self, x: torch.Tensor, n_q: tp.Optional[int] = None) -> torch.Tensor:
+    def encode(
+        self, x: torch.Tensor, n_q: tp.Optional[int] = None
+    ) -> torch.Tensor:
         residual = x[0]
         quantized = torch.zeros(residual.shape)
         all_indices = []
         n_q = n_q or len(self.layers)
-        for i,layer in enumerate(self.layers[:n_q]):
+        for i, layer in enumerate(self.layers[:n_q]):
             residual = x[i] - quantized.detach()
             indices = layer.encode(residual)
             quantized = layer.decode(indices)
@@ -340,6 +361,7 @@ class ResidualVectorQuantization(nn.Module):
             quantized = layer.decode(indices)
             quantized_out = quantized_out + quantized
         return quantized_out
+
 
 @dataclass
 class QuantizedResult:
@@ -383,6 +405,7 @@ class ResidualVectorQuantizer(nn.Module):
     >>> print(recon_feat.shape)
     torch.Size([3, 6, 1024])
     """
+
     def __init__(
         self,
         dimension: int = 256,
@@ -411,7 +434,9 @@ class ResidualVectorQuantizer(nn.Module):
             threshold_ema_dead_code=self.threshold_ema_dead_code,
         )
 
-    def forward(self, x: torch.Tensor, frame_rate: int, n_q: tp.Optional[int]= None) -> QuantizedResult:
+    def forward(
+        self, x: torch.Tensor, frame_rate: int, n_q: tp.Optional[int] = None
+    ) -> QuantizedResult:
         """Residual vector quantization on the given input tensor.
         Args:
             x (torch.Tensor): Input tensor.
@@ -426,7 +451,9 @@ class ResidualVectorQuantizer(nn.Module):
         n_q = n_q or self.n_q
         quantized, codes, commit_loss = self.vq(x, n_q=n_q)
         bw = torch.tensor(n_q * bw_per_q).to(x)
-        return QuantizedResult(quantized, codes, bw, penalty=torch.mean(commit_loss))
+        return QuantizedResult(
+            quantized, codes, bw, penalty=torch.mean(commit_loss)
+        )
 
     # def get_num_quantizers_for_bandwidth(self, frame_rate: int, bandwidth: tp.Optional[float] = None) -> int:
     #     """Return n_q based on specified target bandwidth.
@@ -445,7 +472,9 @@ class ResidualVectorQuantizer(nn.Module):
         """
         return math.log2(self.bins) * frame_rate
 
-    def encode(self, x: torch.Tensor, n_q: tp.Optional[int]= None) -> torch.Tensor:
+    def encode(
+        self, x: torch.Tensor, n_q: tp.Optional[int] = None
+    ) -> torch.Tensor:
         """Encode a given input tensor with the specified frame rate at the given bandwidth.
         The RVQ encode method sets the appropriate number of quantizers to use
         and returns indices for each quantizer.
@@ -455,7 +484,6 @@ class ResidualVectorQuantizer(nn.Module):
         return codes
 
     def decode(self, codes: torch.Tensor) -> torch.Tensor:
-        """Decode the given codes to the quantized representation.
-        """
+        """Decode the given codes to the quantized representation."""
         quantized = self.vq.decode(codes)
         return quantized
