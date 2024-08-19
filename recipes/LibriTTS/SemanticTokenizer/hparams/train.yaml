@@ -45,20 +45,20 @@ dynamic_batching: False
 #  Wav2Vec2 |  facebook/wav2vec2-large
 #  WavLM    |  overrides                  #
 ########################################################
-ssl_model_type: WavLM # hubert, wavml or wav2vec2
-ssl_hub: facebook/wav2vec2-large
+ssl_model_type: wavlm # hubert, wavml or wav2vec2
+ssl_hub: microsoft/wavlm-base
 ssl_folder: !ref <save_folder>/ssl_checkpoint
 freeze_ssl: True
 freeze_feature_extractor: True
 
 # Codec Param
-n_q: 25
-num_codebooks: 1024
+n_q: 5
+num_codebooks: 100
 
 
 # embedding params
-vocab_size: 13312  # K-means size
-embedding_dim: 1024
+vocab_size: 500  # K-means size
+embedding_dim: 768
 
 ssl_model: !apply:speechbrain.utils.hparams.choice
    value: !ref <ssl_model_type>
@@ -103,9 +103,9 @@ sample_rate: 16000
 layer_drop: True
 
 hop_length: 256
-win_length: 1024
+win_length: 768
 n_mel_channels: 80
-n_fft: 1024
+n_fft: 768
 mel_fmin: 0.0
 mel_fmax: 8000
 mel_normalized: False
@@ -121,7 +121,7 @@ learning_rate: 0.0002
 weight_decay: 0.9999
 adam_b1: 0.8
 adam_b2: 0.99
-batch_size: 2
+batch_size: 1
 
 train_dataloader_opts:
   batch_size: !ref <batch_size>
@@ -143,7 +143,7 @@ duration_predictor: False
 multi_speaker: False
 
 # generator params
-in_channels: !ref <Eembedding_dim>
+in_channels: !ref <embedding_dim>
 out_channels: 1
 
 var_pred_hidden_dim: 128
@@ -200,14 +200,48 @@ generator: !new:speechbrain.lobes.models.HifiGAN.UnitHifiganGenerator
   var_pred_kernel_size: !ref <var_pred_kernel_size>
   var_pred_dropout: !ref <var_pred_dropout>
   multi_speaker: !ref <multi_speaker>
+  skip_token_embedding: True
 
 discriminator: !new:speechbrain.lobes.models.HifiGAN.HifiganDiscriminator
+
+
+discrete_embedding_layer: !new:model.Discrete_EmbeddingLayer
+   num_codebooks: !ref <n_q>
+   vocab_size: !ref <num_codebooks>
+   emb_dim: !ref <embedding_dim>
+
+attention_mlp: !new:model.AttentionMLP
+   input_dim: !ref <embedding_dim>
+   hidden_dim: !ref <embedding_dim>
+
+### ASR Head ###
+loss_reduction: 'batchmean'
+output_neurons: 29  # BPE size, index(blank/eos/bos) = 0
+blank_index: 0
+label_smoothing: 0.0
+# Outputs
+token_type: char  # ["unigram", "bpe", "char"]
+character_coverage: 1.0
+
+log_softmax: !new:torch.nn.LogSoftmax
+    dim: -1
+
+ctc_lin: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <embedding_dim>
+    n_neurons: !ref <output_neurons>
+
+ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
+    blank_index: !ref <blank_index>
+    reduction: !ref <loss_reduction>
 
 modules:
   generator: !ref <generator>
   discriminator: !ref <discriminator>
   ssl_model: !ref <ssl_model>
   codec: !ref <codec>
+  ctc_lin: !ref <ctc_lin>
+  attention_mlp: !ref <attention_mlp>
+  discrete_embedding_layer: !ref <discrete_embedding_layer>
 
 #generator loss
 stft_loss: null
@@ -276,3 +310,6 @@ checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
     generator: !ref <generator>
     discriminator: !ref <discriminator>
     counter: !ref <epoch_counter>
+    attention_mlp: !ref <attention_mlp>
+    codec: !ref <codec>
+    discrete_embedding_layer: !ref <discrete_embedding_layer>

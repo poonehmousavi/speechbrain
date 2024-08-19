@@ -24,6 +24,7 @@ from hyperpyyaml import load_hyperpyyaml
 import speechbrain as sb
 from speechbrain.utils.data_utils import scalarize
 from speechbrain.utils.distributed import if_main_process, run_on_main
+from speechbrain.tokenizers.SentencePiece import SentencePiece
 
 
 class SemTokenBrain(sb.Brain):
@@ -62,6 +63,18 @@ class SemTokenBrain(sb.Brain):
                 )
                 codes[:, :, layers_to_drop] = 0
 
+
+
+
+        embeddings = self.modules.discrete_embedding_layer(codes)
+        att_w = self.modules.attention_mlp(embeddings)
+        enc_out = torch.matmul(att_w.transpose(2, -1), embeddings).squeeze(-2)
+
+        # output layer for ctc log-probabilities
+        logits = self.modules.ctc_lin(enc_out)
+        p_ctc = self.hparams.log_softmax(logits)
+
+
         # Trim end of audio
         code_length = min(
             wavs.shape[1] // self.hparams.code_hop_size, codes.shape[1]
@@ -79,8 +92,9 @@ class SemTokenBrain(sb.Brain):
                 [wavs, codes], self.hparams.segment_size
             )
             codes = codes.swapdims(1, 2)
+        embeddings = self.modules.discrete_embedding_layer(codes)
         # generate sythesized waveforms
-        y_g_hat, (log_dur_pred, log_dur) = self.modules.generator(codes)
+        y_g_hat, (log_dur_pred, log_dur) = self.modules.generator(embeddings)
         y_g_hat = y_g_hat[:, :, : wavs.size(1)]
 
         # get scores and features from discriminator for real and synthesized waveforms
@@ -99,6 +113,7 @@ class SemTokenBrain(sb.Brain):
             feats_real,
             log_dur_pred,
             log_dur,
+            p_ctc
         )
 
     def compute_objectives(self, predictions, batch, stage):
@@ -117,8 +132,9 @@ class SemTokenBrain(sb.Brain):
             A one-element tensor used for backpropagating the gradient.
         """
         batch = batch.to(self.device)
-        # wavs, wav_lens = batch.sig
-        # wavs, wav_lens = wavs.to(self.device), wav_lens.to(self.device)
+        tokens, tokens_lens = batch.tokens
+        _, wav_lens = batch.sig
+        wav_lens =  wav_lens.to(self.device)
 
         (
             wavs,
@@ -130,6 +146,7 @@ class SemTokenBrain(sb.Brain):
             feats_real,
             log_dur_pred,
             log_dur,
+            p_ctc,
         ) = predictions
 
         # Hold on to the batch for the inference sample. This is needed because
@@ -148,6 +165,12 @@ class SemTokenBrain(sb.Brain):
         )
 
         loss_d = self.hparams.discriminator_loss(scores_fake, scores_real)
+        
+        loss_ctc = self.hparams.ctc_cost(
+            p_ctc, tokens, wav_lens, tokens_lens
+        ).sum()
+
+
         loss = {**loss_g, **loss_d}
         self.last_loss_stats[stage] = scalarize(loss)
 
@@ -178,6 +201,7 @@ class SemTokenBrain(sb.Brain):
             feats_real,
             log_dur_pred,
             log_dur,
+            p_ctc,
         ) = outputs
         # calculate discriminator loss with the latest updated generator
         loss_d = self.compute_objectives(outputs, batch, sb.core.Stage.TRAIN)[
@@ -201,6 +225,7 @@ class SemTokenBrain(sb.Brain):
             feats_real,
             log_dur_pred,
             log_dur,
+            p_ctc
         )
         loss_g = self.compute_objectives(outputs, batch, sb.core.Stage.TRAIN)[
             "G_loss"
@@ -443,10 +468,6 @@ def dataio_prepare(hparams):
     """This function prepares the datasets to be used in the brain class.
     It also defines the data processing pipeline through user-defined functions.
     """
-    # segment_size = hparams["segment_size"]
-    # code_hop_size = hparams["code_hop_size"]
-    # code_folder = pl.Path(hparams["codes_folder"])
-
     # Define audio pipeline:
     @sb.utils.data_pipeline.takes("wav")
     @sb.utils.data_pipeline.provides("sig")
@@ -457,39 +478,18 @@ def dataio_prepare(hparams):
             info.sample_rate,
             hparams["sample_rate"],
         )(audio)
-
-        # code = np.load(code_folder / f"{utt_id}.npy")
-
-        # num_layer = len(hparams["layer"])
-        # offsets = np.arange(num_layer) * hparams["num_clusters"]
-        # code = code + offsets + 1
-
-        # if hparams["layer_drop"]:
-        #     num_layers_to_drop = np.random.randint(0, code.shape[1])
-        #     if num_layers_to_drop > 0:
-        #         layers_to_drop = np.random.choice(
-        #             code.shape[1], size=num_layers_to_drop, replace=False
-        #         )
-        #         code[:, layers_to_drop] = 0
-
-        # code = torch.IntTensor(code)
         return audio
-        # # Trim end of audio
-        # code_length = min(audio.shape[0] // code_hop_size, code.shape[0])
-        # code = code[:code_length]
-        # audio = audio[: code_length * code_hop_size]
-
-        # while audio.shape[0] < segment_size:
-        #     audio = torch.hstack([audio, audio])
-        #     code = torch.hstack([code, code])
-        # audio = audio.unsqueeze(0)
-
-        # if segment:
-        #     code = code.swapdims(0, 1)
-        #     audio, code = sample_interval([audio, code], segment_size)
-        #     code = code.swapdims(0, 1)
-
-        # return code, audio
+    # Define text pipeline:
+    @sb.utils.data_pipeline.takes("label")
+    @sb.utils.data_pipeline.provides(
+        "wrd", "tokens_list", "tokens"
+    )
+    def text_pipeline(label):
+        yield label
+        tokens_list = hparams['text_tokenizer'].sp.encode_as_ids(label)
+        yield tokens_list
+        tokens = torch.LongTensor(tokens_list)
+        yield tokens
 
     datasets = {}
     data_info = {
@@ -501,8 +501,8 @@ def dataio_prepare(hparams):
         datasets[dataset] = sb.dataio.dataset.DynamicItemDataset.from_json(
             json_path=data_info[dataset],
             replacements={"data_root": hparams["data_folder"]},
-            dynamic_items=[audio_pipeline],
-            output_keys=["id", "sig"],
+            dynamic_items=[audio_pipeline,text_pipeline ],
+            output_keys=["id", "sig","tokens"],
         )
 
     return datasets
@@ -546,7 +546,17 @@ if __name__ == "__main__":
             "skip_prep": hparams["skip_prep"],
         },
     )
-
+    # Defining tokenizer and loading it
+    text_tokenizer = SentencePiece(
+        model_dir=hparams["save_folder"],
+        vocab_size=hparams["output_neurons"],
+        annotation_train=hparams["train_json"],
+        annotation_read="label",
+        model_type=hparams["token_type"],
+        character_coverage=hparams["character_coverage"],
+        annotation_format="json",
+    )
+    hparams['text_tokenizer'] = text_tokenizer
     # here we create the datasets objects as well as tokenization and encoding
     datasets = dataio_prepare(hparams)
 
