@@ -48,11 +48,12 @@ class ESTBrain(sb.Brain):
         batch = batch.to(self.device)
         wavs, wav_lens = batch.sig
         y, _ = batch.sig
+        y=y.unsqueeze(1)
 
         # generate synthesized waveforms
-        feats = self.modules.ssl_model(wavs.squeeze(1), wav_lens)
+        feats = self.modules.ssl_model(wavs, wav_lens)
         x = self.modules.codec( rearrange(feats,"n b t d -> n b d t"))
-        y_g_hat,(log_dur_pred, log_dur) = self.modules.generator(rearrange(x['embeddings'],"b n d t -> b t n d"))
+        y_g_hat,(log_dur_pred, log_dur) = self.modules.generator(rearrange(x['embeddings'],"b n d t -> b t n d").contiguous())
         y_g_hat = y_g_hat[:,:,:y.shape[2]]
         # get scores and features from discriminator for real and synthesized waveforms
         scores_fake, feats_fake = self.modules.discriminator(y_g_hat.detach())
@@ -77,6 +78,7 @@ class ESTBrain(sb.Brain):
         """
         batch = batch.to(self.device)
         y, _ = batch.sig
+        y=y.unsqueeze(1)
 
         # Hold on to the batch for the inference sample. This is needed because
         # the inference sample is run from on_stage_end only, where
@@ -105,7 +107,7 @@ class ESTBrain(sb.Brain):
         """
         batch = batch.to(self.device)
         y, _ = batch.sig
-
+        y=y.unsqueeze(1)
         outputs = self.compute_forward(batch, sb.core.Stage.TRAIN)
         (y_g_hat, scores_fake, feats_fake, scores_real, feats_real, log_dur_pred,log_dur) = outputs
         # calculate discriminator loss with the latest updated generator
@@ -377,7 +379,7 @@ def dataio_prepare(hparams):
             info.sample_rate,
             hparams["sample_rate"],
         )(audio)
-        return audio.unsqueeze(0)
+        return audio
     # Define text pipeline:
     @sb.utils.data_pipeline.takes("label")
     @sb.utils.data_pipeline.provides(
