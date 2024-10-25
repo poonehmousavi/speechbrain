@@ -51,15 +51,17 @@ class ESTBrain(sb.Brain):
         y=y.unsqueeze(1)
 
         # generate synthesized waveforms
-        feats = self.modules.ssl_model(wavs, wav_lens)
+        with torch.set_grad_enabled(not self.hparam.freeze_ssl):
+            feats = self.modules.ssl_model(wavs, wav_lens)
         x = self.modules.codec( rearrange(feats,"n b t d -> n b d t"))
         y_g_hat,(log_dur_pred, log_dur) = self.modules.generator(rearrange(x['embeddings'],"b n d t -> b t n d").contiguous())
         y_g_hat = y_g_hat[:,:,:y.shape[2]]
         # get scores and features from discriminator for real and synthesized waveforms
         scores_fake, feats_fake = self.modules.discriminator(y_g_hat.detach())
         scores_real, feats_real = self.modules.discriminator(y[:,:,:y_g_hat.shape[-1]])
+        vq_los={"vq/commitment_loss":x["vq/commitment_loss"], "vq/codebook_loss":x["vq/codebook_loss"]}
 
-        return (y_g_hat, scores_fake, feats_fake, scores_real, feats_real,log_dur_pred,log_dur)
+        return (y_g_hat, scores_fake, feats_fake, scores_real, feats_real,log_dur_pred,log_dur, vq_los)
 
     def compute_objectives(self, predictions, batch, stage):
         """Computes the loss given the predicted and targeted outputs.
@@ -85,12 +87,12 @@ class ESTBrain(sb.Brain):
         # batch information is not available
         self.last_batch = (y, y)
 
-        y_hat, scores_fake, feats_fake, scores_real, feats_real, log_dur_pred,log_dur = predictions
+        y_hat, scores_fake, feats_fake, scores_real, feats_real, log_dur_pred,log_dur ,vq_los= predictions
         loss_g = self.hparams.generator_loss(
             stage, y_hat, y[:,:,:y_hat.shape[-1]], scores_fake, feats_fake, feats_real,log_dur_pred,log_dur
         )
         loss_d = self.hparams.discriminator_loss(scores_fake, scores_real)
-        loss = {**loss_g, **loss_d}
+        loss = {**loss_g, **loss_d, **vq_los}
         self.last_loss_stats[stage] = scalarize(loss)
         return loss
 
@@ -109,7 +111,7 @@ class ESTBrain(sb.Brain):
         y, _ = batch.sig
         y=y.unsqueeze(1)
         outputs = self.compute_forward(batch, sb.core.Stage.TRAIN)
-        (y_g_hat, scores_fake, feats_fake, scores_real, feats_real, log_dur_pred,log_dur) = outputs
+        (y_g_hat, scores_fake, feats_fake, scores_real, feats_real, log_dur_pred,log_dur, vq_los) = outputs
         # calculate discriminator loss with the latest updated generator
         loss_d = self.compute_objectives(outputs, batch, sb.core.Stage.TRAIN)[
             "D_loss"
@@ -122,7 +124,7 @@ class ESTBrain(sb.Brain):
         # calculate generator loss with the latest updated discriminator
         scores_fake, feats_fake = self.modules.discriminator(y_g_hat)
         scores_real, feats_real = self.modules.discriminator(y[:,:,:y_g_hat.shape[-1]])
-        outputs = (y_g_hat, scores_fake, feats_fake, scores_real, feats_real, log_dur_pred,log_dur)
+        outputs = (y_g_hat, scores_fake, feats_fake, scores_real, feats_real, log_dur_pred,log_dur, vq_los)
         loss_g = self.compute_objectives(outputs, batch, sb.core.Stage.TRAIN)[
             "G_loss"
         ]

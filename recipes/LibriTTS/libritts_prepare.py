@@ -212,7 +212,7 @@ def create_json(wav_list, json_file, sample_rate, model_name=None):
         # relative_path = os.path.join("{data_root}", *path_parts[-4:])
 
         # Gets the path for the text files and extracts the input text
-        normalized_text_path = os.path.join(
+        normalized_text_path = os.path.join("/",
             *path_parts[:-1], uttid + ".normalized.txt"
         )
         try:
