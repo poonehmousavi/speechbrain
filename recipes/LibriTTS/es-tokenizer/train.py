@@ -51,7 +51,7 @@ class ESTBrain(sb.Brain):
         y=y.unsqueeze(1)
 
         # generate synthesized waveforms
-        with torch.set_grad_enabled(not self.hparam.freeze_ssl):
+        with torch.set_grad_enabled(not self.hparams.freeze_ssl):
             feats = self.modules.ssl_model(wavs, wav_lens)
         x = self.modules.codec( rearrange(feats,"n b t d -> n b d t"))
         y_g_hat,(log_dur_pred, log_dur) = self.modules.generator(rearrange(x['embeddings'],"b n d t -> b t n d").contiguous())
