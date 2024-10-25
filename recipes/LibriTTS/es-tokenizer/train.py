@@ -372,15 +372,18 @@ def dataio_prepare(hparams):
     It also defines the data processing pipeline through user-defined functions.
     """
     # Define audio pipeline:
-    @sb.utils.data_pipeline.takes("wav")
+    @sb.utils.data_pipeline.takes("wav", "segment")
     @sb.utils.data_pipeline.provides("sig")
-    def audio_pipeline(wav):
+    def audio_pipeline(wav,segment):
+        segment_size = hparams["segment_size"]
         info = torchaudio.info(wav)
         audio = sb.dataio.dataio.read_audio(wav)
         audio = torchaudio.transforms.Resample(
             info.sample_rate,
             hparams["sample_rate"],
         )(audio)
+        if segment:
+            audio = sample_interval([audio], segment_size)[0]
         return audio
     # Define text pipeline:
     @sb.utils.data_pipeline.takes("label")
