@@ -14,8 +14,8 @@ use_tensorboard: False
 #################################
 # Data files and pre-processing #
 #################################
-data_folder: dataset/LibriTTS # e,g./path/to/LibriSpeech
-train_split: [dev-other]
+data_folder: !PLACEHOLDER # e,g./path/to/LibriSpeech
+train_split: [train-clean-100]
 valid_split: [dev-clean]
 test_split: [test-clean]
 train_json: !ref <save_folder>/train.json
