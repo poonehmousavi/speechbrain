@@ -382,6 +382,9 @@ def dataio_prepare(hparams):
             info.sample_rate,
             hparams["sample_rate"],
         )(audio)
+        while audio.shape[0] < segment_size:
+            audio = torch.hstack([audio, audio])
+
         if segment:
             audio = sample_interval([audio], segment_size)[0]
         return audio
