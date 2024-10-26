@@ -118,10 +118,8 @@ class ESTBrain(sb.Brain):
         ]
         # First train the discriminator
         self.optimizer_d.zero_grad()
-        self.optimizer_vq.zero_grad()
         loss_d.backward()
         self.optimizer_d.step()
-        self.optimizer_vq.step()
 
         # calculate generator loss with the latest updated discriminator
         scores_fake, feats_fake = self.modules.discriminator(y_g_hat)
