@@ -233,21 +233,21 @@ class ESTBrain(sb.Brain):
             self.scheduler_vq.step()
             lr_g = self.optimizer_g.param_groups[-1]["lr"]
             lr_d = self.optimizer_d.param_groups[-1]["lr"]
-            lr_d = self.optimizer_vq.param_groups[-1]["lr"]
+            lr_vq = self.optimizer_vq.param_groups[-1]["lr"]
 
             stats = {
                 **self.last_loss_stats[sb.Stage.VALID],
             }
 
             self.hparams.train_logger.log_stats(  # 1#2#
-                stats_meta={"Epoch": epoch, "lr_g": lr_g, "lr_d": lr_d},
+                stats_meta={"Epoch": epoch, "lr_g": lr_g, "lr_d": lr_d, "lr_vq": lr_vq},
                 train_stats=self.last_loss_stats[sb.Stage.TRAIN],
                 valid_stats=stats,
             )
             # The tensorboard_logger writes a summary to stdout and to the logfile.
             if self.hparams.use_tensorboard:
                 self.tensorboard_logger.log_stats(
-                    stats_meta={"Epoch": epoch, "lr_g": lr_g, "lr_d": lr_d},
+                    stats_meta={"Epoch": epoch, "lr_g": lr_g, "lr_d": lr_d, "lr_vq": lr_vq},
                     train_stats=self.last_loss_stats[sb.Stage.TRAIN],
                     valid_stats=stats,
                 )
