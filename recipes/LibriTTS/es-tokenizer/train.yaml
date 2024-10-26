@@ -14,7 +14,7 @@ use_tensorboard: False
 #################################
 # Data files and pre-processing #
 #################################
-data_folder: !PLACEHOLDER # e,g./path/to/LibriSpeech
+data_folder: dataset/LibriTTS # e,g./path/to/LibriSpeech
 train_split: [train-clean-100]
 valid_split: [dev-clean]
 test_split: [test-clean]
@@ -25,7 +25,7 @@ libritts_subsets: null
 splits: ["train", "valid", "test"]
 split_ratio: null
 skip_prep: False
-
+segment: True
 
 ################################
 # ASR Parameters             #
@@ -249,11 +249,20 @@ opt_class_discriminator: !name:torch.optim.AdamW
   lr: !ref <learning_rate>
   betas: [!ref <adam_b1>, !ref <adam_b2>]
 
+opt_class_vq: !name:torch.optim.AdamW
+  lr: !ref <learning_rate>
+  betas: [!ref <adam_b1>, !ref <adam_b2>]
+
+
 sch_class_generator: !name:torch.optim.lr_scheduler.ExponentialLR
   gamma: !ref <weight_decay>
   last_epoch: -1
 
 sch_class_discriminator: !name:torch.optim.lr_scheduler.ExponentialLR
+  gamma: !ref <weight_decay>
+  last_epoch: -1
+
+sch_class_vq: !name:torch.optim.lr_scheduler.ExponentialLR
   gamma: !ref <weight_decay>
   last_epoch: -1
 
@@ -271,3 +280,4 @@ checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
     generator: !ref <generator>
     discriminator: !ref <discriminator>
     counter: !ref <epoch_counter>
+    codec : !ref <codec>

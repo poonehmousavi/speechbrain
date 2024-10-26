@@ -118,8 +118,10 @@ class ESTBrain(sb.Brain):
         ]
         # First train the discriminator
         self.optimizer_d.zero_grad()
+        self.optimizer_vq.zero_grad()
         loss_d.backward()
         self.optimizer_d.step()
+        self.optimizer_vq.step()
 
         # calculate generator loss with the latest updated discriminator
         scores_fake, feats_fake = self.modules.discriminator(y_g_hat)
@@ -130,8 +132,10 @@ class ESTBrain(sb.Brain):
         ]
         # Then train the generator
         self.optimizer_g.zero_grad()
+        self.optimizer_vq.zero_grad()
         loss_g.backward()
         self.optimizer_g.step()
+        self.optimizer_vq.step()
 
         return loss_g.detach().cpu()
 
@@ -172,21 +176,26 @@ class ESTBrain(sb.Brain):
             (
                 opt_g_class,
                 opt_d_class,
+                opt_vq_class,
                 sch_g_class,
                 sch_d_class,
+                sch_vq_class,
             ) = self.opt_class
 
             self.optimizer_g = opt_g_class(self.modules.generator.parameters())
             self.optimizer_d = opt_d_class(
                 self.modules.discriminator.parameters()
             )
+            self.optimizer_vq = opt_vq_class(self.modules.codec.parameters())
             self.optimizers_dict = {
                 "optimizer_g": self.optimizer_g,
                 "optimizer_d": self.optimizer_d,
+                "optimizer_vq": self.optimizer_vq,
             }
 
             self.scheduler_g = sch_g_class(self.optimizer_g)
             self.scheduler_d = sch_d_class(self.optimizer_d)
+            self.scheduler_vq = sch_vq_class(self.optimizer_vq)
 
             if self.checkpointer is not None:
                 self.checkpointer.add_recoverable(
@@ -196,12 +205,17 @@ class ESTBrain(sb.Brain):
                     "optimizer_d", self.optimizer_d
                 )
                 self.checkpointer.add_recoverable(
+                    "optimizer_vq", self.optimizer_vq
+                )
+                self.checkpointer.add_recoverable(
                     "scheduler_g", self.scheduler_d
                 )
                 self.checkpointer.add_recoverable(
                     "scheduler_d", self.scheduler_d
                 )
-
+                self.checkpointer.add_recoverable(
+                    "scheduler_vq", self.scheduler_vq
+                )
     def on_stage_end(self, stage, stage_loss, epoch):
         """Gets called at the end of an epoch.
 
@@ -219,8 +233,10 @@ class ESTBrain(sb.Brain):
             # Update learning rate
             self.scheduler_g.step()
             self.scheduler_d.step()
+            self.scheduler_vq.step()
             lr_g = self.optimizer_g.param_groups[-1]["lr"]
             lr_d = self.optimizer_d.param_groups[-1]["lr"]
+            lr_d = self.optimizer_vq.param_groups[-1]["lr"]
 
             stats = {
                 **self.last_loss_stats[sb.Stage.VALID],
@@ -375,6 +391,7 @@ def dataio_prepare(hparams):
     @sb.utils.data_pipeline.takes("wav", "segment")
     @sb.utils.data_pipeline.provides("sig")
     def audio_pipeline(wav,segment):
+        segment =segment & hparams['segment']
         segment_size = hparams["segment_size"]
         info = torchaudio.info(wav)
         audio = sb.dataio.dataio.read_audio(wav)
@@ -475,8 +492,10 @@ if __name__ == "__main__":
         opt_class=[
             hparams["opt_class_generator"],
             hparams["opt_class_discriminator"],
+            hparams["opt_class_vq"],
             hparams["sch_class_generator"],
             hparams["sch_class_discriminator"],
+            hparams["sch_class_vq"],
         ],
         hparams=hparams,
         run_opts=run_opts,
