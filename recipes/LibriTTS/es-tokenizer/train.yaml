@@ -127,6 +127,12 @@ inference_padding: 5
 cond_channels: 0
 conv_post_bias: True
 
+lambdas: 
+  G_loss: 1.0 
+  vq/commitment_loss: 0.25
+  vq/codebook_loss: 1.0
+
+
 ssl_model: !apply:speechbrain.utils.hparams.choice
    value: !ref <ssl_model_type>
    choices:

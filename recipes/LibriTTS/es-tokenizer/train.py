@@ -125,9 +125,8 @@ class ESTBrain(sb.Brain):
         scores_fake, feats_fake = self.modules.discriminator(y_g_hat)
         scores_real, feats_real = self.modules.discriminator(y[:,:,:y_g_hat.shape[-1]])
         outputs = (y_g_hat, scores_fake, feats_fake, scores_real, feats_real, log_dur_pred,log_dur, vq_los)
-        loss_g = self.compute_objectives(outputs, batch, sb.core.Stage.TRAIN)[
-            "G_loss"
-        ]
+        loss_g = self.compute_objectives(outputs, batch, sb.core.Stage.TRAIN)
+        loss_g= sum([v * loss_g[k] for k, v in hparams['lambdas'].items() if k in loss_g])
         # Then train the generator
         self.optimizer_g.zero_grad()
         self.optimizer_vq.zero_grad()
