@@ -13,7 +13,7 @@ import copy
 import pathlib as pl
 import random
 import sys
-
+import warnings
 import numpy as np
 import torch
 import torchaudio
@@ -99,14 +99,15 @@ class ESTBrain(sb.Brain):
         if (stage != sb.Stage.TRAIN) and self.hparams.compute_metrics:
             if stage == sb.Stage.TEST:
                 self.dnsmos_metric.append(IDs, y_hat.squeeze(0), y_lens)
-                self.utmos_metric.append(IDs, y_hat.squeeze(0), y_lens)
-                self.dwer_metric.append(IDs, y_hat.squeeze(0), y.squeeze(0), y_lens)
-                self.wavlm_sim_metric.append(
+            self.utmos_metric.append(IDs, y_hat.squeeze(0), y_lens)
+            self.dwer_metric.append(IDs, y_hat.squeeze(0), y.squeeze(0), y_lens)
+            self.wavlm_sim_metric.append(
                 IDs, y_hat.squeeze(0), y.squeeze(0), y_lens
-                )
-                self.ecapatdnn_sim_metric.append(
+            )
+            self.ecapatdnn_sim_metric.append(
                 IDs, y_hat.squeeze(0), y.squeeze(0), y_lens
-                )
+            )
+
         return loss
 
     def fit_batch(self, batch):
@@ -169,17 +170,6 @@ class ESTBrain(sb.Brain):
         loss_g = loss["G_loss"]
         return loss_g.detach().cpu()
 
-    def on_stage_start(self, stage, epoch=None):
-        """Gets called at the beginning of each epoch."""
-        super().on_stage_start(stage, epoch)
-        if (stage != sb.Stage.TRAIN) and self.hparams.compute_metrics:
-            if stage == sb.Stage.TEST:
-                self.dnsmos_metric = self.hparams.dnsmos_computer()
-                self.utmos_metric = self.hparams.utmos_computer()
-                self.dwer_metric = self.hparams.dwer_computer()
-                self.wavlm_sim_metric = self.hparams.wavlm_sim_computer()
-                self.ecapatdnn_sim_metric = self.hparams.ecapatdnn_sim_computer()
-    
     def on_fit_start(self):
         """Gets called at the beginning of ``fit()``, on multiple processes
         if ``distributed_count > 0`` and backend is ddp and initializes statistics.
@@ -188,6 +178,7 @@ class ESTBrain(sb.Brain):
         self.last_batch = None
         self.last_loss_stats = {}
         return super().on_fit_start()
+
     def init_optimizers(self):
         """Called during ``on_fit_start()``, initialize optimizers
         after parameters are fully configured (e.g. DDP, jit).
@@ -236,6 +227,18 @@ class ESTBrain(sb.Brain):
                 self.checkpointer.add_recoverable(
                     "scheduler_vq", self.scheduler_vq
                 )
+
+    def on_stage_start(self, stage, epoch=None):
+        """Gets called at the beginning of each epoch."""
+        super().on_stage_start(stage, epoch)
+        if (stage != sb.Stage.TRAIN) and self.hparams.compute_metrics:
+            if stage == sb.Stage.TEST:
+                self.dnsmos_metric = self.hparams.dnsmos_computer()
+            self.utmos_metric = self.hparams.utmos_computer()
+            self.dwer_metric = self.hparams.dwer_computer()
+            self.wavlm_sim_metric = self.hparams.wavlm_sim_computer()
+            self.ecapatdnn_sim_metric = self.hparams.ecapatdnn_sim_computer()
+            
     def on_stage_end(self, stage, stage_loss, epoch):
         """Gets called at the end of an epoch.
 
@@ -261,6 +264,7 @@ class ESTBrain(sb.Brain):
             stats = {
                 **self.last_loss_stats[sb.Stage.VALID],
             }
+
             if self.hparams.compute_metrics:
                 stats["UTMOS"] = self.utmos_metric.summarize("average")
                 stats["dWER"] = self.dwer_metric.summarize("error_rate")
@@ -485,6 +489,10 @@ if __name__ == "__main__":
 
     with open(hparams_file) as fin:
         hparams = load_hyperpyyaml(fin, overrides)
+
+    # Filter warnings
+    warnings.filterwarnings("once")
+    warnings.filterwarnings("ignore", module="torch")
 
     # If --distributed_launch then
     # create ddp_group with the right communication protocol

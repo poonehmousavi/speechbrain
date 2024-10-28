@@ -30,7 +30,7 @@ SAVE_DIR = "pretrained_models"
 
 
 class DNSMOS(MetricStats):
-    def __init__(self, sample_rate):
+    def __init__(self, sample_rate,save_path=SAVE_DIR):
         self.sample_rate = sample_rate
         # self.onnx_sess = ort.InferenceSession(PRIMARY_MODEL_PATH)
         sess_options = ort.SessionOptions()
@@ -38,8 +38,8 @@ class DNSMOS(MetricStats):
         sess_options.intra_op_num_threads = os.cpu_count()
 
         # Download dnmos model checkpoint
-        fetch(MODEL_NAME, MODEL_URL, SAVE_DIR)
-        model_path = pl.Path(SAVE_DIR) / MODEL_NAME
+        fetch(MODEL_NAME, MODEL_URL, save_path)
+        model_path = pl.Path(save_path) / MODEL_NAME
         assert model_path.exists()
 
         self.p808_onnx_sess = ort.InferenceSession(

@@ -84,18 +84,18 @@ class _UTMOS(nn.Module):
 
 
 class UTMOS(MetricStats):
-    def __init__(self, sample_rate):
+    def __init__(self, sample_rate,save_path=SAVE_DIR):
         self.sample_rate = sample_rate
         self.clear()
 
-        encoder_path = pl.Path(SAVE_DIR) / "encoder"
+        encoder_path = pl.Path(save_path) / "encoder"
         self.model = _UTMOS(
             source=ENCODER_HUB, save_path=encoder_path.as_posix()
         )
 
         # Download utmos model checkpoint
-        fetch(MODEL_NAME, MODEL_URL, SAVE_DIR)
-        model_path = pl.Path(SAVE_DIR) / MODEL_NAME
+        fetch(MODEL_NAME, MODEL_URL, save_path)
+        model_path = pl.Path(save_path) / MODEL_NAME
         assert model_path.exists()
 
         # Load weights
