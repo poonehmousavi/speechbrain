@@ -10,7 +10,7 @@ progress_sample_path: !ref <output_folder>/samples
 epochs: 100
 keep_checkpoint_interval: 50
 use_tensorboard: False
-
+compute_metrics: True
 #################################
 # Data files and pre-processing #
 #################################
@@ -279,6 +279,27 @@ epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
 train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger
   save_file: !ref <train_log>
 
+
+dnsmos_computer: !name:metrics.dnsmos.DNSMOS
+    sample_rate: !ref <sample_rate>
+
+utmos_computer: !name:metrics.utmos.UTMOS
+    sample_rate: !ref <sample_rate>
+
+dwer_computer: !name:metrics.dwer.DWER
+    model_hub: openai/whisper-small
+    save_path: !ref <save_folder>/whsiper
+    sample_rate: !ref <sample_rate>
+
+wavlm_sim_computer: !name:metrics.speaker_similarity.SpkSimWavLM
+    model_hub: microsoft/wavlm-base-sv
+    save_path: !ref <save_folder>/wavlm
+    sample_rate: !ref <sample_rate>
+
+ecapatdnn_sim_computer: !name:metrics.speaker_similarity.SpkSimECAPATDNN
+    model_hub: speechbrain/spkrec-ecapa-voxceleb
+    save_path: !ref <save_folder>/ecapa
+    sample_rate: !ref <sample_rate>
 #checkpointer
 checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
   checkpoints_dir: !ref <save_folder>

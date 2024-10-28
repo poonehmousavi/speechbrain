@@ -79,21 +79,34 @@ class ESTBrain(sb.Brain):
             A one-element tensor used for backpropagating the gradient.
         """
         batch = batch.to(self.device)
-        y, _ = batch.sig
+        y, y_lens = batch.sig
         y=y.unsqueeze(1)
-
+        IDs = batch.id
         # Hold on to the batch for the inference sample. This is needed because
         # the inference sample is run from on_stage_end only, where
         # batch information is not available
         self.last_batch = (y, y)
-
+        
         y_hat, scores_fake, feats_fake, scores_real, feats_real, log_dur_pred,log_dur ,vq_los= predictions
+        y=y[:,:,:y_hat.shape[-1]]
         loss_g = self.hparams.generator_loss(
-            stage, y_hat, y[:,:,:y_hat.shape[-1]], scores_fake, feats_fake, feats_real,log_dur_pred,log_dur
+            stage, y_hat, y, scores_fake, feats_fake, feats_real,log_dur_pred,log_dur
         )
         loss_d = self.hparams.discriminator_loss(scores_fake, scores_real)
         loss = {**loss_g, **loss_d, **vq_los}
         self.last_loss_stats[stage] = scalarize(loss)
+        
+        if (stage != sb.Stage.TRAIN) and self.hparams.compute_metrics:
+            if stage == sb.Stage.TEST:
+                self.dnsmos_metric.append(IDs, y_hat.squeeze(0), y_lens)
+            self.utmos_metric.append(IDs, y_hat.squeeze(0), y_lens)
+            self.dwer_metric.append(IDs, y_hat.squeeze(0), y.squeeze(0), y_lens)
+            self.wavlm_sim_metric.append(
+                IDs, y_hat.squeeze(0), y.squeeze(0), y_lens
+            )
+            self.ecapatdnn_sim_metric.append(
+                IDs, y_hat.squeeze(0), y.squeeze(0), y_lens
+            )
         return loss
 
     def fit_batch(self, batch):
@@ -156,6 +169,17 @@ class ESTBrain(sb.Brain):
         loss_g = loss["G_loss"]
         return loss_g.detach().cpu()
 
+    def on_stage_start(self, stage, epoch=None):
+        """Gets called at the beginning of each epoch."""
+        super().on_stage_start(stage, epoch)
+        if (stage != sb.Stage.TRAIN) and self.hparams.compute_metrics:
+            if stage == sb.Stage.TEST:
+                self.dnsmos_metric = self.hparams.dnsmos_computer()
+            self.utmos_metric = self.hparams.utmos_computer()
+            self.dwer_metric = self.hparams.dwer_computer()
+            self.wavlm_sim_metric = self.hparams.wavlm_sim_computer()
+            self.ecapatdnn_sim_metric = self.hparams.ecapatdnn_sim_computer()
+    
     def on_fit_start(self):
         """Gets called at the beginning of ``fit()``, on multiple processes
         if ``distributed_count > 0`` and backend is ddp and initializes statistics.
@@ -164,7 +188,6 @@ class ESTBrain(sb.Brain):
         self.last_batch = None
         self.last_loss_stats = {}
         return super().on_fit_start()
-
     def init_optimizers(self):
         """Called during ``on_fit_start()``, initialize optimizers
         after parameters are fully configured (e.g. DDP, jit).
@@ -238,6 +261,18 @@ class ESTBrain(sb.Brain):
             stats = {
                 **self.last_loss_stats[sb.Stage.VALID],
             }
+            if self.hparams.compute_metrics:
+                stats["UTMOS"] = self.utmos_metric.summarize("average")
+                stats["dWER"] = self.dwer_metric.summarize("error_rate")
+                stats["WavLMSim"] = self.wavlm_sim_metric.summarize("average")
+                stats["ECAPATDNNSim"] = self.ecapatdnn_sim_metric.summarize(
+                    "average"
+                )
+                # Cleanup for next epoch
+                del self.utmos_metric
+                del self.dwer_metric
+                del self.wavlm_sim_metric
+                del self.ecapatdnn_sim_metric
 
             self.hparams.train_logger.log_stats(  # 1#2#
                 stats_meta={"Epoch": epoch, "lr_g": lr_g, "lr_d": lr_d, "lr_vq": lr_vq},
@@ -279,14 +314,27 @@ class ESTBrain(sb.Brain):
 
         # We also write statistics about test data to stdout and to the TensorboardLogger.
         if stage == sb.Stage.TEST:
+            stats = {
+                **self.last_loss_stats[sb.Stage.TEST],
+            }
+            if self.hparams.compute_metrics:
+                stats["DNSMOS"] = self.dnsmos_metric.summarize("average")
+                stats["UTMOS"] = self.utmos_metric.summarize("average")
+                stats["dWER"] = self.dwer_metric.summarize("error_rate")
+                stats["WavLMSim"] = self.wavlm_sim_metric.summarize("average")
+                stats["ECAPATDNNSim"] = self.ecapatdnn_sim_metric.summarize(
+                    "average"
+                )
+                
             self.hparams.train_logger.log_stats(  # 1#2#
                 {"Epoch loaded": self.hparams.epoch_counter.current},
-                test_stats=self.last_loss_stats[sb.Stage.TEST],
+                test_stats=stats,
             )
+
             if self.hparams.use_tensorboard:
                 self.tensorboard_logger.log_stats(
                     {"Epoch loaded": self.hparams.epoch_counter.current},
-                    test_stats=self.last_loss_stats[sb.Stage.TEST],
+                    test_stats=stats,
                 )
             self.run_inference_sample("Test", epoch)
 
