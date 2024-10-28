@@ -1,3 +1,5 @@
 # Needed for quantization
 scikit-learn
 einops
+librosa
+onnxruntime

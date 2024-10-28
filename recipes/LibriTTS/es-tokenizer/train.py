@@ -99,14 +99,14 @@ class ESTBrain(sb.Brain):
         if (stage != sb.Stage.TRAIN) and self.hparams.compute_metrics:
             if stage == sb.Stage.TEST:
                 self.dnsmos_metric.append(IDs, y_hat.squeeze(0), y_lens)
-            self.utmos_metric.append(IDs, y_hat.squeeze(0), y_lens)
-            self.dwer_metric.append(IDs, y_hat.squeeze(0), y.squeeze(0), y_lens)
-            self.wavlm_sim_metric.append(
+                self.utmos_metric.append(IDs, y_hat.squeeze(0), y_lens)
+                self.dwer_metric.append(IDs, y_hat.squeeze(0), y.squeeze(0), y_lens)
+                self.wavlm_sim_metric.append(
                 IDs, y_hat.squeeze(0), y.squeeze(0), y_lens
-            )
-            self.ecapatdnn_sim_metric.append(
+                )
+                self.ecapatdnn_sim_metric.append(
                 IDs, y_hat.squeeze(0), y.squeeze(0), y_lens
-            )
+                )
         return loss
 
     def fit_batch(self, batch):
@@ -175,10 +175,10 @@ class ESTBrain(sb.Brain):
         if (stage != sb.Stage.TRAIN) and self.hparams.compute_metrics:
             if stage == sb.Stage.TEST:
                 self.dnsmos_metric = self.hparams.dnsmos_computer()
-            self.utmos_metric = self.hparams.utmos_computer()
-            self.dwer_metric = self.hparams.dwer_computer()
-            self.wavlm_sim_metric = self.hparams.wavlm_sim_computer()
-            self.ecapatdnn_sim_metric = self.hparams.ecapatdnn_sim_computer()
+                self.utmos_metric = self.hparams.utmos_computer()
+                self.dwer_metric = self.hparams.dwer_computer()
+                self.wavlm_sim_metric = self.hparams.wavlm_sim_computer()
+                self.ecapatdnn_sim_metric = self.hparams.ecapatdnn_sim_computer()
     
     def on_fit_start(self):
         """Gets called at the beginning of ``fit()``, on multiple processes
