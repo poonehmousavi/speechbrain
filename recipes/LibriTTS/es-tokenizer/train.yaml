@@ -279,13 +279,6 @@ epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
 train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger
   save_file: !ref <train_log>
 
-whisper: !new:speechbrain.lobes.models.huggingface_transformers.whisper.Whisper
-    source: openai/whisper-small
-    freeze_encoder: True
-    save_path: !ref <save_folder>/whisper
-    language: "english"
-    task: "transcribe"
-    sampling_rate: !ref <sample_rate>
 
 dnsmos_computer: !name:metrics.dnsmos.DNSMOS
     sample_rate: !ref <sample_rate>
@@ -299,7 +292,7 @@ dwer_computer: !name:metrics.dwer.DWER
     model_hub: openai/whisper-small
     save_path: !ref <save_folder>/whsiper
     sample_rate: !ref <sample_rate>
-    model: !ref <whisper>
+
 
 wavlm_sim_computer: !name:metrics.speaker_similarity.SpkSimWavLM
     model_hub: microsoft/wavlm-base-sv
