@@ -18,15 +18,9 @@ SAMPLE_RATE = 16000
 
 
 class DWER(MetricStats):
-    def __init__(self, model_hub, save_path, sample_rate):
+    def __init__(self, model_hub, save_path, sample_rate,model):
         self.sample_rate = sample_rate
-        self.model = Whisper(
-            model_hub,
-            save_path,
-            SAMPLE_RATE,
-            freeze=True,
-            freeze_encoder=True,
-        ).cpu()
+        self.model = model.cpu()
         self.searcher = S2SWhisperGreedySearcher(
             self.model,
             min_decode_ratio=0.0,
