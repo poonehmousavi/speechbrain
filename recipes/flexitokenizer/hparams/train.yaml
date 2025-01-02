@@ -1,0 +1,16 @@
+ljspeech:
+  data_folder: "path/to/ljspeech/data"
+  save_folder: "path/to/ljspeech/output"
+  splits: ["train", "valid", "test"]
+  split_ratio: [80, 10, 10]
+  seed: 1234
+  skip_prep: False
+
+librispeech:
+  data_folder: "path/to/librispeech/data"
+  save_folder: "path/to/librispeech/output"
+  splits: ["train", "valid", "test"]
+  split_ratio: [90, 5, 5]
+  seed: 5678
+  skip_prep: True
+datasets: ["ljspeech", "otherdataset"]
